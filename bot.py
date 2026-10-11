@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import Message
 
-BOT_TOKEN = "ВСТАВЬТЕ_СЮДА_НОВЫЙ_ТОКЕН"
+BOT_TOKEN = "8910348962:AAHnP_GYZasuMY_HcmRwbjj2NfmQdpIf_S0"
 
 logging.basicConfig(level=logging.INFO)
 
