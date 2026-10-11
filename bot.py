@@ -1,9 +1,9 @@
+
 import asyncio
 import logging
 import random
 import time
 from collections import defaultdict
-from datetime import date
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -12,6 +12,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineQuery, InlineQueryResultArticle,
     InputTextMessageContent, BotCommand,
+    ReplyKeyboardMarkup, KeyboardButton,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -19,7 +20,7 @@ import db
 from data import (
     OTCHESTVA, RAZGOVORNYE, TRANSLIT, UDARENIYA, NAME_ORIGIN,
     CELEBRITIES, SAINTS, FACTS, CHARACTER, PREDICTIONS, TOASTS,
-    THEMES, EXAMPLE_OTCH,
+    THEMES,
 )
 
 # ===================== КОНФИГ =====================
@@ -33,6 +34,7 @@ log = logging.getLogger("bot")
 
 dp = Dispatcher()
 _user_hits = defaultdict(list)
+QUIZ_STATE: dict[int, str] = {}
 
 # ===================== УТИЛИТЫ =====================
 def is_flood(uid: int) -> bool:
@@ -55,16 +57,14 @@ def udarenie(o: str) -> str:
     return UDARENIYA.get(normalize(o), o)
 
 def skloneniya(otch: str, female: bool):
-    """Простые склонения по правилам."""
-    base = otch[:-2] if otch.endswith("ич") else otch[:-2]  # грубо
     if female:
         return [
-            otch,                                   # им.
-            otch[:-1] + "у",                        # род. (Ивановны -> Ивановну? упрощённо)
-            otch[:-1] + "е",                        # дат.
-            otch,                                   # вин.
-            otch[:-1] + "ой",                       # тв.
-            otch[:-1] + "е",                        # пр.
+            otch,
+            otch[:-1] + "у",
+            otch[:-1] + "е",
+            otch,
+            otch[:-1] + "ой",
+            otch[:-1] + "е",
         ]
     return [
         otch, otch + "а", otch + "у", otch + "а", otch + "ем", "о " + otch + "е"
@@ -107,7 +107,24 @@ def check_achievements(uid: int, correct: bool, streak: int):
     return unlocked
 
 # ===================== КЛАВИАТУРЫ =====================
-def main_menu(uid=None):
+MENU_TEXTS = {
+    "📊 Профиль", "🏆 Топ", "🎯 Викторина", "⭐ Избранное",
+    "📜 История", "💡 Факт", "🔮 Предсказание", "ℹ️ Помощь",
+}
+
+def bottom_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Профиль"), KeyboardButton(text="🏆 Топ")],
+            [KeyboardButton(text="🎯 Викторина"), KeyboardButton(text="⭐ Избранное")],
+            [KeyboardButton(text="📜 История"), KeyboardButton(text="💡 Факт")],
+            [KeyboardButton(text="🔮 Предсказание"), KeyboardButton(text="ℹ️ Помощь")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Напиши отчество (например, Иванович)",
+    )
+
+def main_menu():
     kb = InlineKeyboardBuilder()
     kb.button(text="🎯 Викторина", callback_data="quiz")
     kb.button(text="🎲 Пример", callback_data="example")
@@ -135,7 +152,7 @@ def quiz_kb(correct_name: str):
     kb.adjust(2)
     return kb.as_markup()
 
-# ===================== ХЭНДЛЕРЫ =====================
+# ===================== /start и /help =====================
 @dp.message(CommandStart(deep_link=True))
 async def cmd_start_ref(message: Message, command):
     ref = command.args
@@ -152,35 +169,70 @@ async def cmd_start_ref(message: Message, command):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     db.create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    me = await message.bot.me()
     text = (
         f"👋 <b>Привет, {message.from_user.first_name}!</b>\n\n"
         "Я умею по <b>отчеству</b> определять имя твоего отца.\n"
         "А ещё: викторина, профиль, топ, избранное, история, факты.\n\n"
         "Просто напиши отчество: <code>Иванович</code> или <code>Петровна</code>.\n\n"
         f"🔗 Твоя реферальная ссылка:\n"
-        f"<code>https://t.me/{(await message.bot.me()).username}?start={message.from_user.id}</code>"
+        f"<code>https://t.me/{me.username}?start={message.from_user.id}</code>"
     )
-    await message.answer(text, reply_markup=main_menu())
+    await message.answer(text, reply_markup=bottom_kb())
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
     await message.answer(
         "📖 <b>Что я умею</b>\n\n"
         "• Определяю имя отца по отчеству\n"
-        "• Обратно: имя → отчество\n"
+        "• Обратно: имя + м/ж → отчество\n"
         "• Склонения, транслит, ударение\n"
         "• Викторина, очки, достижения, топ\n"
         "• Профиль, история, избранное\n"
         "• Факты, происхождение имён, святые, знаменитости\n"
         "• Предсказания и тосты\n"
         "• Inline-режим: <code>@бот Иванович</code> в любом чате\n\n"
-        "Команды: /start /help /profile /top /fav /history /quiz /fact /random",
-        reply_markup=main_menu(),
+        "Команды: /start /help /profile /top /fav /history /quiz /random /fact",
+        reply_markup=bottom_kb(),
     )
 
+# ===================== Reply-кнопки снизу =====================
+@dp.message(F.text == "📊 Профиль")
+async def kb_profile(message: Message):
+    await send_profile(message, message.from_user.id)
+
+@dp.message(F.text == "🏆 Топ")
+async def kb_top(message: Message):
+    await send_top(message)
+
+@dp.message(F.text == "🎯 Викторина")
+async def kb_quiz(message: Message):
+    await start_quiz(message, message.from_user.id)
+
+@dp.message(F.text == "⭐ Избранное")
+async def kb_fav(message: Message):
+    await send_fav(message, message.from_user.id)
+
+@dp.message(F.text == "📜 История")
+async def kb_history(message: Message):
+    await send_history(message, message.from_user.id)
+
+@dp.message(F.text == "💡 Факт")
+async def kb_fact(message: Message):
+    await message.answer("💡 " + random.choice(FACTS))
+
+@dp.message(F.text == "🔮 Предсказание")
+async def kb_predict(message: Message):
+    await message.answer("🔮 " + random.choice(PREDICTIONS))
+
+@dp.message(F.text == "ℹ️ Помощь")
+async def kb_help(message: Message):
+    await cmd_help(message)
+
+# ===================== Команды =====================
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
-    await send_profile(message)
+    await send_profile(message, message.from_user.id)
 
 @dp.message(Command("top"))
 async def cmd_top(message: Message):
@@ -188,15 +240,21 @@ async def cmd_top(message: Message):
 
 @dp.message(Command("fav"))
 async def cmd_fav(message: Message):
-    await send_fav(message)
+    parts = message.text.split(maxsplit=1)
+    if len(parts) == 1:
+        await send_fav(message, message.from_user.id)
+        return
+    otch = parts[1].strip()
+    db.add_favorite(message.from_user.id, capitalize_otch(otch))
+    await message.answer(f"⭐ Добавлено в избранное: <b>{capitalize_otch(otch)}</b>")
 
 @dp.message(Command("history"))
 async def cmd_history(message: Message):
-    await send_history(message)
+    await send_history(message, message.from_user.id)
 
 @dp.message(Command("quiz"))
 async def cmd_quiz(message: Message):
-    await start_quiz(message)
+    await start_quiz(message, message.from_user.id)
 
 @dp.message(Command("fact"))
 async def cmd_fact(message: Message):
@@ -207,7 +265,7 @@ async def cmd_random(message: Message):
     m, (f, name) = random.choice(list(OTCHESTVA.items()))
     await message.answer(f"🎲 <b>{random.choice([m, f]).capitalize()}</b> → отец <b>{name}</b>")
 
-# ---- callback-хэндлеры ----
+# ===================== Callback-кнопки =====================
 @dp.callback_query(F.data == "profile")
 async def cb_profile(call: CallbackQuery):
     await send_profile(call.message, call.from_user.id)
@@ -270,6 +328,22 @@ async def cb_settheme(call: CallbackQuery):
     await call.message.answer(f"Тема сохранена: {THEMES.get(code, code)}")
     await call.answer("Готово")
 
+@dp.callback_query(F.data.startswith("favadd:"))
+async def cb_favadd(call: CallbackQuery):
+    otch = call.data.split(":", 1)[1]
+    db.add_favorite(call.from_user.id, otch)
+    await call.answer("⭐ Добавлено", show_alert=False)
+
+# ===================== ВИКТОРИНА =====================
+async def start_quiz(message: Message, uid: int | None = None):
+    m, (f, name) = random.choice(list(OTCHESTVA.items()))
+    otch = capitalize_otch(random.choice([m, f]))
+    sent = await message.answer(
+        f"🎯 <b>Викторина</b>\n\nКак зовут отца, если отчество: <b>{otch}</b>?",
+        reply_markup=quiz_kb(name),
+    )
+    QUIZ_STATE[sent.message_id] = name
+
 @dp.callback_query(F.data == "quiz")
 async def cb_quiz(call: CallbackQuery):
     await start_quiz(call.message, call.from_user.id)
@@ -277,32 +351,38 @@ async def cb_quiz(call: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("quizans:"))
 async def cb_quizans(call: CallbackQuery):
-    answer = call.data.split(":", 1)[1]
-    correct_name = dp["quiz_correct"].get(call.from_user.id) if "quiz_correct" in dp else None
-    # храним состояние в простом словаре
-    correct_name = QUIZ_STATE.get(call.from_user.id)
+    correct_name = QUIZ_STATE.get(call.message.message_id)
     if correct_name is None:
-        await call.answer("Викторина устарела, начни заново", show_alert=True)
+        await call.answer("Викторина устарела, начни новую: /quiz", show_alert=True)
         return
+
+    answer = call.data.split(":", 1)[1]
+
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    QUIZ_STATE.pop(call.message.message_id, None)
+
     if answer == correct_name:
         db.add_points(call.from_user.id, 1)
         db.inc_streak(call.from_user.id, True)
         user = db.get_user(call.from_user.id)
         streak = user["streak"] if user else 1
         unlocked = check_achievements(call.from_user.id, True, streak)
+
         text = f"✅ Верно! +1 очко. Серия: {streak}"
         if unlocked:
             text += "\n\n🏅 " + "\n🏅 ".join(unlocked)
         await call.message.answer(text)
-        QUIZ_STATE.pop(call.from_user.id, None)
+        await call.answer("Верно!")
         await start_quiz(call.message, call.from_user.id)
     else:
         db.inc_streak(call.from_user.id, False)
         await call.message.answer(f"❌ Неверно. Правильно: <b>{correct_name}</b>")
-        QUIZ_STATE.pop(call.from_user.id, None)
-    await call.answer()
+        await call.answer("Мимо")
 
-# ---- вспомогательные рендеры ----
+# ===================== Рендеры =====================
 async def send_profile(message: Message, uid=None):
     uid = uid or message.chat.id
     u = db.get_user(uid)
@@ -322,7 +402,7 @@ async def send_profile(message: Message, uid=None):
     )
     if ach:
         text += "\n" + "\n".join(f"• {a}" for a in ach[:10])
-    await message.answer(text, reply_markup=main_menu())
+    await message.answer(text)
 
 async def send_top(message: Message):
     rows = db.top_users(10)
@@ -357,30 +437,8 @@ async def send_history(message: Message, uid=None):
         lines.append(f"• {r['otchestvo']} → {r['father']}")
     await message.answer("\n".join(lines))
 
-QUIZ_STATE = {}
-
-async def start_quiz(message: Message, uid=None):
-    uid = uid or message.chat.id
-    m, (f, name) = random.choice(list(OTCHESTVA.items()))
-    otch = capitalize_otch(random.choice([m, f]))
-    QUIZ_STATE[uid] = name
-    await message.answer(
-        f"🎯 <b>Викторина</b>\n\nКак зовут отца, если отчество: <b>{otch}</b>?",
-        reply_markup=quiz_kb(name),
-    )
-
-# ===================== ОСНОВНОЙ ТЕКСТ =====================
-@dp.message(Command("fav"))
-async def cmd_fav_add(message: Message):
-    parts = message.text.split(maxsplit=1)
-    if len(parts) == 1:
-        await send_fav(message)
-        return
-    otch = parts[1].strip()
-    db.add_favorite(message.from_user.id, capitalize_otch(otch))
-    await message.answer(f"⭐ Добавлено в избранное: <b>{capitalize_otch(otch)}</b>")
-
-@dp.message(F.text & ~F.text.startswith("/"))
+# ===================== Основной текст =====================
+@dp.message(F.text & ~F.text.startswith("/") & ~F.text.in_(MENU_TEXTS))
 async def handle_text(message: Message):
     uid = message.from_user.id
     if is_flood(uid):
@@ -388,7 +446,7 @@ async def handle_text(message: Message):
         return
     text = message.text.strip()
 
-    # Обратное: "Иван м" или "Иван ж"
+    # Обратное: "Иван м" / "Иван ж"
     parts = text.split()
     if len(parts) == 2 and parts[1].lower() in ("м", "ж", "m", "f"):
         female = parts[1].lower() in ("ж", "f")
@@ -446,17 +504,11 @@ async def handle_text(message: Message):
 
     await message.answer(text_out, reply_markup=kb.as_markup())
 
-@dp.callback_query(F.data.startswith("favadd:"))
-async def cb_favadd(call: CallbackQuery):
-    otch = call.data.split(":", 1)[1]
-    db.add_favorite(call.from_user.id, otch)
-    await call.answer("⭐ Добавлено", show_alert=False)
-
 @dp.message(~F.text)
 async def handle_non_text(message: Message):
     await message.answer("Пришли, пожалуйста, текст с отчеством 🙂")
 
-# ===================== INLINE-РЕЖИМ =====================
+# ===================== Inline =====================
 @dp.inline_query()
 async def inline_handler(query: InlineQuery):
     q = query.query.strip()
@@ -487,7 +539,7 @@ async def inline_handler(query: InlineQuery):
         ))
     await query.answer(results, cache_time=5, is_personal=True)
 
-# ===================== АДМИНКА =====================
+# ===================== Админка =====================
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
     if message.from_user.id not in ADMIN_IDS:
@@ -503,7 +555,6 @@ async def cmd_admin(message: Message):
         lines.append(f"• {r['otchestvo']} — {r['c']}")
     lines.append("\nКоманды:")
     lines.append("/broadcast текст — рассылка")
-    lines.append("/ban — заглушка")
     await message.answer("\n".join(lines))
 
 @dp.message(Command("broadcast"))
@@ -524,7 +575,7 @@ async def cmd_broadcast(message: Message):
             failed += 1
     await message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
 
-# ===================== ЗАПУСК =====================
+# ===================== Запуск =====================
 async def set_commands(bot: Bot):
     await bot.set_my_commands([
         BotCommand(command="start", description="Старт"),
