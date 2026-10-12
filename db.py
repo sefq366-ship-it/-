@@ -17,6 +17,7 @@ def init_db():
             theme TEXT DEFAULT 'light',
             lang TEXT DEFAULT 'ru',
             referred_by INTEGER,
+            referrals INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             daily_date TEXT,
             daily_done INTEGER DEFAULT 0
@@ -62,11 +63,47 @@ def create_user(user_id, username, first_name, referred_by=None):
         )
         con.commit()
 
+def update_user_profile(user_id, username, first_name):
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE users SET username=?, first_name=? WHERE user_id=?",
+            (username, first_name, user_id),
+        )
+        con.commit()
+
+def set_referred_by(user_id, referrer_id):
+    """Устанавливает referrer только если его ещё нет и это не сам юзер."""
+    if user_id == referrer_id:
+        return False
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        cur = con.cursor()
+        cur.execute("SELECT referred_by FROM users WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+        if row is None:
+            cur.execute("INSERT OR IGNORE INTO users(user_id) VALUES(?)", (user_id,))
+            current = None
+        else:
+            current = row[0]
+        if current:
+            return False
+        cur.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referrer_id, user_id))
+        con.commit()
+        return True
+
 def add_points(user_id, pts):
     with closing(sqlite3.connect(DB_PATH)) as con:
         cur = con.cursor()
         cur.execute("INSERT OR IGNORE INTO users(user_id, points) VALUES(?, 0)", (user_id,))
         cur.execute("UPDATE users SET points=points+? WHERE user_id=?", (pts, user_id))
+        con.commit()
+
+def add_referral(user_id):
+    """+1 к счётчику приглашённых."""
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        cur = con.cursor()
+        cur.execute("INSERT OR IGNORE INTO users(user_id, referrals) VALUES(?, 0)", (user_id,))
+        cur.execute("UPDATE users SET referrals=referrals+1 WHERE user_id=?", (user_id,))
         con.commit()
 
 def inc_streak(user_id, correct=True):
@@ -133,6 +170,17 @@ def top_users(limit=10):
         con.row_factory = sqlite3.Row
         cur = con.cursor()
         cur.execute("SELECT first_name, username, points, best_streak FROM users ORDER BY points DESC LIMIT ?", (limit,))
+        return cur.fetchall()
+
+def top_referrers(limit=10):
+    with closing(sqlite3.connect(DB_PATH)) as con:
+        con.row_factory = sqlite3.Row
+        cur = con.cursor()
+        cur.execute(
+            "SELECT first_name, username, referrals FROM users "
+            "WHERE referrals > 0 ORDER BY referrals DESC LIMIT ?",
+            (limit,),
+        )
         return cur.fetchall()
 
 def set_theme(user_id, theme):
