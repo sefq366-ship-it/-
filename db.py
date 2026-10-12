@@ -65,12 +65,14 @@ def create_user(user_id, username, first_name, referred_by=None):
 def add_points(user_id, pts):
     with closing(sqlite3.connect(DB_PATH)) as con:
         cur = con.cursor()
+        cur.execute("INSERT OR IGNORE INTO users(user_id, points) VALUES(?, 0)", (user_id,))
         cur.execute("UPDATE users SET points=points+? WHERE user_id=?", (pts, user_id))
         con.commit()
 
 def inc_streak(user_id, correct=True):
     with closing(sqlite3.connect(DB_PATH)) as con:
         cur = con.cursor()
+        cur.execute("INSERT OR IGNORE INTO users(user_id, streak, best_streak) VALUES(?,0,0)", (user_id,))
         if correct:
             cur.execute("UPDATE users SET streak=streak+1 WHERE user_id=?", (user_id,))
             cur.execute("UPDATE users SET best_streak=MAX(best_streak, streak) WHERE user_id=?", (user_id,))
@@ -111,7 +113,6 @@ def get_favorites(user_id):
         return [r[0] for r in cur.fetchall()]
 
 def grant_achievement(user_id, code) -> bool:
-    """True, если выдали впервые."""
     with closing(sqlite3.connect(DB_PATH)) as con:
         cur = con.cursor()
         try:
@@ -140,12 +141,6 @@ def set_theme(user_id, theme):
         cur.execute("UPDATE users SET theme=? WHERE user_id=?", (theme, user_id))
         con.commit()
 
-def set_daily(user_id, date_str, done):
-    with closing(sqlite3.connect(DB_PATH)) as con:
-        cur = con.cursor()
-        cur.execute("UPDATE users SET daily_date=?, daily_done=? WHERE user_id=?", (date_str, done, user_id))
-        con.commit()
-
 def global_stats():
     with closing(sqlite3.connect(DB_PATH)) as con:
         con.row_factory = sqlite3.Row
@@ -164,10 +159,3 @@ def all_user_ids():
         cur = con.cursor()
         cur.execute("SELECT user_id FROM users")
         return [r[0] for r in cur.fetchall()]
-
-def top_otchestva(limit=5):
-    with closing(sqlite3.connect(DB_PATH)) as con:
-        con.row_factory = sqlite3.Row
-        cur = con.cursor()
-        cur.execute("SELECT otchestvo, COUNT(*) c FROM history GROUP BY otchestvo ORDER BY c DESC LIMIT ?", (limit,))
-        return cur.fetchall()
