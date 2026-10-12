@@ -12,7 +12,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import (
     Message, CallbackQuery, InlineQuery, InlineQueryResultArticle,
     InputTextMessageContent, BotCommand,
-    ReplyKeyboardMarkup, KeyboardButton,
+    ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -34,7 +34,7 @@ log = logging.getLogger("bot")
 
 dp = Dispatcher()
 _user_hits = defaultdict(list)
-QUIZ_STATE: dict[int, str] = {}
+QUIZ_STATE: dict[int, dict] = {}
 
 # ===================== УТИЛИТЫ =====================
 def is_flood(uid: int) -> bool:
@@ -138,18 +138,6 @@ def main_menu():
     kb.button(text="🎨 Тема", callback_data="theme")
     kb.button(text="ℹ️ Помощь", callback_data="help")
     kb.adjust(2, 2, 2, 2, 2, 1)
-    return kb.as_markup()
-
-def quiz_kb(correct_name: str):
-    options = {correct_name}
-    while len(options) < 4:
-        options.add(random.choice(list(OTCHESTVA.values()))[1])
-    options = list(options)
-    random.shuffle(options)
-    kb = InlineKeyboardBuilder()
-    for opt in options:
-        kb.button(text=opt, callback_data=f"quizans:{opt}")
-    kb.adjust(2)
     return kb.as_markup()
 
 # ===================== /start и /help =====================
@@ -334,28 +322,156 @@ async def cb_favadd(call: CallbackQuery):
     db.add_favorite(call.from_user.id, otch)
     await call.answer("⭐ Добавлено", show_alert=False)
 
-# ===================== ВИКТОРИНА =====================
-async def start_quiz(message: Message, uid: int | None = None):
+# ===================== ВИКТОРИНА (v2) =====================
+QUIZ_LEN = 10
+QUIZ_TIME = 15
+
+def quiz_kb(options: list[str]) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    for opt in options:
+        kb.button(text=opt, callback_data=f"quizans:{opt}")
+    kb.button(text="⏭ Пропустить", callback_data="quizskip")
+    kb.button(text="🛑 Закончить", callback_data="quizstop")
+    kb.adjust(2, 2, 1, 1)
+    return kb.as_markup()
+
+def _new_question():
     m, (f, name) = random.choice(list(OTCHESTVA.items()))
     otch = capitalize_otch(random.choice([m, f]))
+
+    reverse = random.random() < 0.2
+
+    if reverse:
+        correct = otch
+        pool = set()
+        while len(pool) < 3:
+            mm, (ff, _) = random.choice(list(OTCHESTVA.items()))
+            cand = capitalize_otch(random.choice([mm, ff]))
+            if cand != correct:
+                pool.add(cand)
+        options = list(pool | {correct})
+        random.shuffle(options)
+        text = f"Какое отчество у человека, если отца зовут <b>{name}</b>?"
+    else:
+        correct = name
+        pool = set()
+        while len(pool) < 3:
+            _, (_, n) = random.choice(list(OTCHESTVA.items()))
+            if n != correct:
+                pool.add(n)
+        options = list(pool | {correct})
+        random.shuffle(options)
+        text = f"Как зовут отца, если отчество: <b>{otch}</b>?"
+
+    return text, correct, options, ("reverse" if reverse else "forward")
+
+async def start_quiz(message: Message, uid: int | None = None):
+    uid = uid or message.chat.id
+    db.create_user(uid, None, None)
+
+    text, correct, options, qtype = _new_question()
     sent = await message.answer(
-        f"🎯 <b>Викторина</b>\n\nКак зовут отца, если отчество: <b>{otch}</b>?",
-        reply_markup=quiz_kb(name),
+        f"🎯 <b>Викторина</b> — вопрос 1/{QUIZ_LEN}\n\n{text}",
+        reply_markup=quiz_kb(options),
     )
-    QUIZ_STATE[sent.message_id] = name
+    QUIZ_STATE[sent.message_id] = {
+        "uid": uid,
+        "q_num": 1,
+        "score": 0,
+        "correct": correct,
+        "qtype": qtype,
+        "started_at": time.time(),
+        "answered": False,
+    }
+
+async def _next_question(message: Message, state: dict):
+    if state["q_num"] >= QUIZ_LEN:
+        score = state["score"]
+        db.add_points(state["uid"], score)
+        user = db.get_user(state["uid"])
+        bonus_text = ""
+        if score >= 8:
+            db.grant_achievement(state["uid"], "quiz_master")
+            bonus_text = "\n🏅 Достижение: «Мастер викторины»"
+        elif score >= 5:
+            bonus_text = "\n👍 Неплохо!"
+        else:
+            bonus_text = "\n💪 Есть куда расти!"
+
+        await message.answer(
+            f"🏁 <b>Итог викторины</b>\n\n"
+            f"Правильных: <b>{score}/{QUIZ_LEN}</b>\n"
+            f"Начислено очков: <b>+{score}</b>{bonus_text}\n\n"
+            f"Запустить снова — /quiz или кнопка «🎯 Викторина»."
+        )
+        return
+
+    text, correct, options, qtype = _new_question()
+    q_num = state["q_num"] + 1
+    state.update({
+        "q_num": q_num,
+        "correct": correct,
+        "qtype": qtype,
+        "started_at": time.time(),
+        "answered": False,
+    })
+    sent = await message.answer(
+        f"🎯 <b>Вопрос {q_num}/{QUIZ_LEN}</b>  ·  очки: {state['score']}\n\n{text}",
+        reply_markup=quiz_kb(options),
+    )
+    QUIZ_STATE[sent.message_id] = state
 
 @dp.callback_query(F.data == "quiz")
 async def cb_quiz(call: CallbackQuery):
     await start_quiz(call.message, call.from_user.id)
     await call.answer()
 
+@dp.callback_query(F.data == "quizskip")
+async def cb_quizskip(call: CallbackQuery):
+    st = QUIZ_STATE.get(call.message.message_id)
+    if not st or st.get("answered"):
+        await call.answer("Уже отвечено")
+        return
+    st["answered"] = True
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    QUIZ_STATE.pop(call.message.message_id, None)
+    db.inc_streak(st["uid"], False)
+    await call.message.answer(f"⏭ Пропущено. Правильно: <b>{st['correct']}</b>")
+    await call.answer("Пропуск")
+    await _next_question(call.message, st)
+
+@dp.callback_query(F.data == "quizstop")
+async def cb_quizstop(call: CallbackQuery):
+    st = QUIZ_STATE.get(call.message.message_id)
+    if not st:
+        await call.answer("Уже завершено")
+        return
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    QUIZ_STATE.pop(call.message.message_id, None)
+    db.add_points(st["uid"], st["score"])
+    await call.message.answer(
+        f"🛑 Остановлено. Правильных: {st['score']}/{st['q_num'] - 1}. "
+        f"Начислено: +{st['score']}"
+    )
+    await call.answer("Остановлено")
+
 @dp.callback_query(F.data.startswith("quizans:"))
 async def cb_quizans(call: CallbackQuery):
-    correct_name = QUIZ_STATE.get(call.message.message_id)
-    if correct_name is None:
-        await call.answer("Викторина устарела, начни новую: /quiz", show_alert=True)
+    st = QUIZ_STATE.get(call.message.message_id)
+    if not st:
+        await call.answer("Сессия истекла, /quiz", show_alert=True)
+        return
+    if st.get("answered"):
+        await call.answer("Уже отвечено")
         return
 
+    st["answered"] = True
     answer = call.data.split(":", 1)[1]
 
     try:
@@ -364,23 +480,36 @@ async def cb_quizans(call: CallbackQuery):
         pass
     QUIZ_STATE.pop(call.message.message_id, None)
 
-    if answer == correct_name:
-        db.add_points(call.from_user.id, 1)
-        db.inc_streak(call.from_user.id, True)
-        user = db.get_user(call.from_user.id)
-        streak = user["streak"] if user else 1
-        unlocked = check_achievements(call.from_user.id, True, streak)
+    elapsed = time.time() - st["started_at"]
+    speed_bonus = 0
+    if elapsed < 3:
+        speed_bonus = 2
+    elif elapsed < 7:
+        speed_bonus = 1
 
-        text = f"✅ Верно! +1 очко. Серия: {streak}"
-        if unlocked:
-            text += "\n\n🏅 " + "\n🏅 ".join(unlocked)
-        await call.message.answer(text)
+    if answer == st["correct"]:
+        st["score"] += 1 + speed_bonus
+        db.inc_streak(st["uid"], True)
+        user = db.get_user(st["uid"])
+        streak = user["streak"] if user else 1
+
+        extra = []
+        if speed_bonus:
+            extra.append(f"⚡ бонус за скорость +{speed_bonus}")
+        if streak >= 5:
+            extra.append(f"🔥 серия {streak}")
+
+        txt = f"✅ Верно! +{1 + speed_bonus} очк."
+        if extra:
+            txt += "\n" + "\n".join(extra)
+        await call.message.answer(txt)
         await call.answer("Верно!")
-        await start_quiz(call.message, call.from_user.id)
     else:
-        db.inc_streak(call.from_user.id, False)
-        await call.message.answer(f"❌ Неверно. Правильно: <b>{correct_name}</b>")
+        db.inc_streak(st["uid"], False)
+        await call.message.answer(f"❌ Мимо. Правильно: <b>{st['correct']}</b>")
         await call.answer("Мимо")
+
+    await _next_question(call.message, st)
 
 # ===================== Рендеры =====================
 async def send_profile(message: Message, uid=None):
@@ -446,7 +575,6 @@ async def handle_text(message: Message):
         return
     text = message.text.strip()
 
-    # Обратное: "Иван м" / "Иван ж"
     parts = text.split()
     if len(parts) == 2 and parts[1].lower() in ("м", "ж", "m", "f"):
         female = parts[1].lower() in ("ж", "f")
@@ -502,102 +630,4 @@ async def handle_text(message: Message):
     kb.button(text="🎯 Викторина", callback_data="quiz")
     kb.adjust(1, 3)
 
-    await message.answer(text_out, reply_markup=kb.as_markup())
-
-@dp.message(~F.text)
-async def handle_non_text(message: Message):
-    await message.answer("Пришли, пожалуйста, текст с отчеством 🙂")
-
-# ===================== Inline =====================
-@dp.inline_query()
-async def inline_handler(query: InlineQuery):
-    q = query.query.strip()
-    results = []
-    if q:
-        res = find_father(q)
-        if res:
-            name, otch, female = res
-            results.append(InlineQueryResultArticle(
-                id="1",
-                title=f"{otch} → {name}",
-                description="Определить имя отца",
-                input_message_content=InputTextMessageContent(
-                    message_text=f"<b>{otch}</b> → отец <b>{name}</b>",
-                    parse_mode=ParseMode.HTML,
-                ),
-            ))
-    if not results:
-        m, (f, name) = random.choice(list(OTCHESTVA.items()))
-        results.append(InlineQueryResultArticle(
-            id="2",
-            title="Пример: как это работает",
-            description=f"{m.capitalize()} → {name}",
-            input_message_content=InputTextMessageContent(
-                message_text=f"Например: <b>{m.capitalize()}</b> → отец <b>{name}</b>",
-                parse_mode=ParseMode.HTML,
-            ),
-        ))
-    await query.answer(results, cache_time=5, is_personal=True)
-
-# ===================== Админка =====================
-@dp.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    users, queries, top = db.global_stats()
-    lines = [
-        "🛠 <b>Админ-панель</b>\n",
-        f"👥 Пользователей: <b>{users}</b>",
-        f"🔎 Запросов: <b>{queries}</b>\n",
-        "<b>Топ отчеств:</b>",
-    ]
-    for r in top:
-        lines.append(f"• {r['otchestvo']} — {r['c']}")
-    lines.append("\nКоманды:")
-    lines.append("/broadcast текст — рассылка")
-    await message.answer("\n".join(lines))
-
-@dp.message(Command("broadcast"))
-async def cmd_broadcast(message: Message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    parts = message.text.split(maxsplit=1)
-    if len(parts) < 2:
-        await message.answer("Использование: /broadcast текст")
-        return
-    text = parts[1]
-    sent, failed = 0, 0
-    for uid in db.all_user_ids():
-        try:
-            await message.bot.send_message(uid, text)
-            sent += 1
-        except Exception:
-            failed += 1
-    await message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
-
-# ===================== Запуск =====================
-async def set_commands(bot: Bot):
-    await bot.set_my_commands([
-        BotCommand(command="start", description="Старт"),
-        BotCommand(command="help", description="Помощь"),
-        BotCommand(command="profile", description="Профиль"),
-        BotCommand(command="quiz", description="Викторина"),
-        BotCommand(command="top", description="Топ игроков"),
-        BotCommand(command="fav", description="Избранное"),
-        BotCommand(command="history", description="История"),
-        BotCommand(command="random", description="Случайное отчество"),
-        BotCommand(command="fact", description="Факт"),
-    ])
-
-async def main():
-    db.init_db()
-    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    await set_commands(bot)
-    log.info("Бот запущен")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except (KeyboardInterrupt, SystemExit):
-        log.info("Остановлено")
+    await message.answer(text_out, reply_markup
