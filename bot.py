@@ -29,6 +29,8 @@ ADMIN_IDS = {1012040843}          # <-- впишите свой telegram id
 ANTIFLOOD_LIMIT = 6
 ANTIFLOOD_WINDOW = 5.0
 
+REF_BONUS = 5                    # очков пригласившему за друга
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("bot")
 
@@ -59,16 +61,10 @@ def udarenie(o: str) -> str:
 def skloneniya(otch: str, female: bool):
     if female:
         return [
-            otch,
-            otch[:-1] + "у",
-            otch[:-1] + "е",
-            otch,
-            otch[:-1] + "ой",
-            otch[:-1] + "е",
+            otch, otch[:-1] + "у", otch[:-1] + "е",
+            otch, otch[:-1] + "ой", otch[:-1] + "е",
         ]
-    return [
-        otch, otch + "а", otch + "у", otch + "а", otch + "ем", "о " + otch + "е"
-    ]
+    return [otch, otch + "а", otch + "у", otch + "а", otch + "ем", "о " + otch + "е"]
 
 def find_father(text: str):
     raw = text.strip().strip("?!.,;:")
@@ -124,47 +120,65 @@ def bottom_kb() -> ReplyKeyboardMarkup:
         input_field_placeholder="Напиши отчество (например, Иванович)",
     )
 
-def main_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="🎯 Викторина", callback_data="quiz")
-    kb.button(text="🎲 Пример", callback_data="example")
-    kb.button(text="📊 Профиль", callback_data="profile")
-    kb.button(text="🏆 Топ", callback_data="top")
-    kb.button(text="⭐ Избранное", callback_data="fav")
-    kb.button(text="📜 История", callback_data="history")
-    kb.button(text="💡 Факт", callback_data="fact")
-    kb.button(text="🔮 Предсказание", callback_data="predict")
-    kb.button(text="🥂 Тост", callback_data="toast")
-    kb.button(text="🎨 Тема", callback_data="theme")
-    kb.button(text="ℹ️ Помощь", callback_data="help")
-    kb.adjust(2, 2, 2, 2, 2, 1)
-    return kb.as_markup()
-
-# ===================== /start и /help =====================
+# ===================== /start с рефералкой =====================
 @dp.message(CommandStart(deep_link=True))
 async def cmd_start_ref(message: Message, command):
-    ref = command.args
-    referred_by = int(ref) if ref and ref.isdigit() else None
-    db.create_user(message.from_user.id, message.from_user.username, message.from_user.first_name, referred_by)
-    if referred_by and referred_by != message.from_user.id:
-        db.add_points(referred_by, 5)
-        try:
-            await message.bot.send_message(referred_by, "🎁 По твоей ссылке пришёл друг! +5 очков")
-        except Exception:
-            pass
+    referrer_id = None
+    if command.args and command.args.isdigit():
+        candidate = int(command.args)
+        if candidate != message.from_user.id:
+            referrer_id = candidate
+
+    # 1. Создаём юзера
+    db.create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+    )
+    db.update_user_profile(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+    )
+
+    # 2. Если пришёл по реф-ссылке и ещё не привязан — привязываем
+    if referrer_id:
+        ok = db.set_referred_by(message.from_user.id, referrer_id)
+        if ok:
+            db.add_referral(referrer_id)
+            db.add_points(referrer_id, REF_BONUS)
+            try:
+                await message.bot.send_message(
+                    referrer_id,
+                    f"🎁 По твоей ссылке пришёл друг! +{REF_BONUS} очков",
+                )
+            except Exception as e:
+                log.warning("Не удалось уведомить реферера %s: %s", referrer_id, e)
+
     await cmd_start(message)
 
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    db.create_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    db.create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+    )
+    db.update_user_profile(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+    )
     me = await message.bot.me()
+    ref_link = f"https://t.me/{me.username}?start={message.from_user.id}"
     text = (
         f"👋 <b>Привет, {message.from_user.first_name}!</b>\n\n"
         "Я умею по <b>отчеству</b> определять имя твоего отца.\n"
         "А ещё: викторина, профиль, топ, избранное, история, факты.\n\n"
         "Просто напиши отчество: <code>Иванович</code> или <code>Петровна</code>.\n\n"
-        f"🔗 Твоя реферальная ссылка:\n"
-        f"<code>https://t.me/{me.username}?start={message.from_user.id}</code>"
+        "🔗 <b>Твоя реферальная ссылка</b>\n"
+        f"<code>{ref_link}</code>\n"
+        f"За каждого друга — <b>+{REF_BONUS} очков</b> 🎁"
     )
     await message.answer(text, reply_markup=bottom_kb())
 
@@ -180,8 +194,23 @@ async def cmd_help(message: Message):
         "• Факты, происхождение имён, святые, знаменитости\n"
         "• Предсказания и тосты\n"
         "• Inline-режим: <code>@бот Иванович</code> в любом чате\n\n"
-        "Команды: /start /help /profile /top /fav /history /quiz /random /fact",
+        "Команды: /start /help /profile /top /fav /history /quiz /random /fact /ref",
         reply_markup=bottom_kb(),
+    )
+
+@dp.message(Command("ref"))
+async def cmd_ref(message: Message):
+    me = await message.bot.me()
+    u = db.get_user(message.from_user.id)
+    refs = u["referrals"] if u and "referrals" in u.keys() else 0
+    ref_link = f"https://t.me/{me.username}?start={message.from_user.id}"
+    await message.answer(
+        "🔗 <b>Реферальная программа</b>\n\n"
+        f"Твоя ссылка:\n<code>{ref_link}</code>\n\n"
+        f"Приглашено друзей: <b>{refs}</b>\n"
+        f"За каждого — <b>+{REF_BONUS} очков</b> 🎁\n\n"
+        "Отправь ссылку другу — очки придут автоматически, "
+        "когда он запустит бота."
     )
 
 # ===================== Reply-кнопки снизу =====================
@@ -322,7 +351,12 @@ async def cb_favadd(call: CallbackQuery):
     db.add_favorite(call.from_user.id, otch)
     await call.answer("⭐ Добавлено", show_alert=False)
 
-# ===================== ВИКТОРИНА (v2) =====================
+@dp.callback_query(F.data == "reftop")
+async def cb_reftop(call: CallbackQuery):
+    await send_reftop(call.message)
+    await call.answer()
+
+# ===================== ВИКТОРИНА =====================
 QUIZ_LEN = 10
 QUIZ_TIME = 15
 
@@ -338,7 +372,6 @@ def quiz_kb(options: list[str]) -> InlineKeyboardMarkup:
 def _new_question():
     m, (f, name) = random.choice(list(OTCHESTVA.items()))
     otch = capitalize_otch(random.choice([m, f]))
-
     reverse = random.random() < 0.2
 
     if reverse:
@@ -388,7 +421,6 @@ async def _next_question(message: Message, state: dict):
     if state["q_num"] >= QUIZ_LEN:
         score = state["score"]
         db.add_points(state["uid"], score)
-        user = db.get_user(state["uid"])
         bonus_text = ""
         if score >= 8:
             db.grant_achievement(state["uid"], "quiz_master")
@@ -519,6 +551,7 @@ async def send_profile(message: Message, uid=None):
         db.create_user(uid, None, "Гость")
         u = db.get_user(uid)
     ach = db.get_achievements(uid)
+    refs = u["referrals"] if "referrals" in u.keys() else 0
     text = (
         f"📊 <b>Профиль</b>\n\n"
         f"👤 {u['first_name'] or 'Гость'}"
@@ -526,6 +559,7 @@ async def send_profile(message: Message, uid=None):
         f"⭐ Очки: <b>{u['points']}</b>\n"
         f"🔥 Текущая серия: <b>{u['streak']}</b>\n"
         f"🏆 Рекорд серии: <b>{u['best_streak']}</b>\n"
+        f"👥 Приглашено друзей: <b>{refs}</b>\n"
         f"🏅 Достижений: <b>{len(ach)}</b>\n"
         f"🎨 Тема: {THEMES.get(u['theme'], u['theme'])}\n"
     )
@@ -542,6 +576,17 @@ async def send_top(message: Message):
     for i, r in enumerate(rows, 1):
         name = r["first_name"] or (r["username"] or "Гость")
         lines.append(f"{i}. {name} — {r['points']} очк. (серия {r['best_streak']})")
+    await message.answer("\n".join(lines))
+
+async def send_reftop(message: Message):
+    rows = db.top_referrers(10)
+    if not rows:
+        await message.answer("Пока никого не приглашали 🤝")
+        return
+    lines = ["🤝 <b>Топ рефереров</b>\n"]
+    for i, r in enumerate(rows, 1):
+        name = r["first_name"] or (r["username"] or "Гость")
+        lines.append(f"{i}. {name} — {r['referrals']} друзей")
     await message.answer("\n".join(lines))
 
 async def send_fav(message: Message, uid=None):
@@ -683,7 +728,12 @@ async def cmd_admin(message: Message):
         lines.append(f"• {r['otchestvo']} — {r['c']}")
     lines.append("\nКоманды:")
     lines.append("/broadcast текст — рассылка")
+    lines.append("/reftop — топ рефереров")
     await message.answer("\n".join(lines))
+
+@dp.message(Command("reftop"))
+async def cmd_reftop(message: Message):
+    await send_reftop(message)
 
 @dp.message(Command("broadcast"))
 async def cmd_broadcast(message: Message):
@@ -711,6 +761,8 @@ async def set_commands(bot: Bot):
         BotCommand(command="profile", description="Профиль"),
         BotCommand(command="quiz", description="Викторина"),
         BotCommand(command="top", description="Топ игроков"),
+        BotCommand(command="ref", description="Реферальная ссылка"),
+        BotCommand(command="reftop", description="Топ рефереров"),
         BotCommand(command="fav", description="Избранное"),
         BotCommand(command="history", description="История"),
         BotCommand(command="random", description="Случайное отчество"),
