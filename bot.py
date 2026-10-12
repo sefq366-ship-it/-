@@ -630,4 +630,102 @@ async def handle_text(message: Message):
     kb.button(text="🎯 Викторина", callback_data="quiz")
     kb.adjust(1, 3)
 
-    await message.answer(text_out, reply_markup
+    await message.answer(text_out, reply_markup=kb.as_markup())
+
+@dp.message(~F.text)
+async def handle_non_text(message: Message):
+    await message.answer("Пришли, пожалуйста, текст с отчеством 🙂")
+
+# ===================== Inline =====================
+@dp.inline_query()
+async def inline_handler(query: InlineQuery):
+    q = query.query.strip()
+    results = []
+    if q:
+        res = find_father(q)
+        if res:
+            name, otch, female = res
+            results.append(InlineQueryResultArticle(
+                id="1",
+                title=f"{otch} → {name}",
+                description="Определить имя отца",
+                input_message_content=InputTextMessageContent(
+                    message_text=f"<b>{otch}</b> → отец <b>{name}</b>",
+                    parse_mode=ParseMode.HTML,
+                ),
+            ))
+    if not results:
+        m, (f, name) = random.choice(list(OTCHESTVA.items()))
+        results.append(InlineQueryResultArticle(
+            id="2",
+            title="Пример: как это работает",
+            description=f"{m.capitalize()} → {name}",
+            input_message_content=InputTextMessageContent(
+                message_text=f"Например: <b>{m.capitalize()}</b> → отец <b>{name}</b>",
+                parse_mode=ParseMode.HTML,
+            ),
+        ))
+    await query.answer(results, cache_time=5, is_personal=True)
+
+# ===================== Админка =====================
+@dp.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    users, queries, top = db.global_stats()
+    lines = [
+        "🛠 <b>Админ-панель</b>\n",
+        f"👥 Пользователей: <b>{users}</b>",
+        f"🔎 Запросов: <b>{queries}</b>\n",
+        "<b>Топ отчеств:</b>",
+    ]
+    for r in top:
+        lines.append(f"• {r['otchestvo']} — {r['c']}")
+    lines.append("\nКоманды:")
+    lines.append("/broadcast текст — рассылка")
+    await message.answer("\n".join(lines))
+
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("Использование: /broadcast текст")
+        return
+    text = parts[1]
+    sent, failed = 0, 0
+    for uid in db.all_user_ids():
+        try:
+            await message.bot.send_message(uid, text)
+            sent += 1
+        except Exception:
+            failed += 1
+    await message.answer(f"✅ Отправлено: {sent}, ошибок: {failed}")
+
+# ===================== Запуск =====================
+async def set_commands(bot: Bot):
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Старт"),
+        BotCommand(command="help", description="Помощь"),
+        BotCommand(command="profile", description="Профиль"),
+        BotCommand(command="quiz", description="Викторина"),
+        BotCommand(command="top", description="Топ игроков"),
+        BotCommand(command="fav", description="Избранное"),
+        BotCommand(command="history", description="История"),
+        BotCommand(command="random", description="Случайное отчество"),
+        BotCommand(command="fact", description="Факт"),
+    ])
+
+async def main():
+    db.init_db()
+    bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+    await set_commands(bot)
+    log.info("Бот запущен")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        log.info("Остановлено")
