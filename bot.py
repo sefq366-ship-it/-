@@ -1,3 +1,4 @@
+
 import asyncio
 import html
 import logging
@@ -15,7 +16,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 
 # ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-ADMIN_ID = 1012040843
+ADMIN_ID = 123456789
 # ===================================
 
 DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
@@ -93,11 +94,11 @@ async def fetch_metadata(slug):
 
 
 async def lottie_to_gif_file_id(slug):
+    """使用 pyrlottie 将 Lottie JSON 转为 GIF 并上传获取 file_id"""
     try:
-        import lottie
-        from lottie.exporters.gif import export_gif
+        from pyrlottie import convSingleLottie, LottieFile, FileMap, run
     except ImportError:
-        raise RuntimeError("python-lottie 未安装。请在 requirements.txt 中添加：lottie[GIF]")
+        raise RuntimeError("pyrlottie 未安装。请在 requirements.txt 中添加：pyrlottie")
 
     url = LOTTIE_URL.format(slug=slug)
     async with aiohttp.ClientSession() as session:
@@ -113,11 +114,16 @@ async def lottie_to_gif_file_id(slug):
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        animation = lottie.importers.load(json_path)
-        export_gif(animation, gif_path, skip_frames=2, dpi=64)
+        # pyrlottie 转换（单文件）
+        run(
+            convSingleLottie(
+                FileMap(LottieFile(json_path), {gif_path}),
+                1,  # 线程数
+            )
+        )
 
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
-            raise RuntimeError("GIF 文件生成失败（可能 Lottie 格式不兼容）")
+            raise RuntimeError("GIF 生成失败（可能 Lottie 格式不兼容 pyrlottie）")
 
         with open(gif_path, "rb") as gif_file:
             msg = await bot.send_animation(
@@ -179,10 +185,9 @@ def format_caption(nft):
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "🧪 <b>Тест GIF</b>\n\n"
+        "🧪 <b>Тест GIF (pyrlottie)</b>\n\n"
         "Отправь ссылку на NFT:\n"
-        "<code>https://t.me/nft/название-номер</code>\n\n"
-        "Бот попробует скачать Lottie, конвертировать в GIF и сохранить.",
+        "<code>https://t.me/nft/название-номер</code>",
         parse_mode="HTML",
     )
 
@@ -202,7 +207,7 @@ async def handle_text(message: Message):
 
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Конвертирую Lottie → GIF (это может занять время)…")
+        await status.edit_text("🎬 Конвертирую Lottie → GIF через pyrlottie…")
 
         gif_file_id = await lottie_to_gif_file_id(slug)
         save_nft(data, gif_file_id, message.from_user.id)
@@ -213,7 +218,6 @@ async def handle_text(message: Message):
             f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
             f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
             f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
-            f"file_id: <code>{gif_file_id[:50]}…</code>\n\n"
             f"Теперь проверь inline-режим: @твой_бот",
             parse_mode="HTML",
         )
@@ -221,8 +225,7 @@ async def handle_text(message: Message):
         log.exception("失败: %s", slug)
         await status.edit_text(
             f"❌ <b>失败</b>\n\n"
-            f"<code>{html.escape(str(exc)[:500])}</code>\n\n"
-            f"Если ошибка — формат несовместим/пустой GIF.",
+            f"<code>{html.escape(str(exc)[:500])}</code>",
             parse_mode="HTML",
         )
 
