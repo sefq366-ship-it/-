@@ -1,45 +1,34 @@
+
 import asyncio
 import html
 import logging
+import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 
 import aiohttp
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, InlineQuery, InlineQueryResultPhoto
+from aiogram.filters import CommandStart
+from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 
-# ==========================================================
-# 1) ВСТАВЬ НОВЫЙ ТОКЕН МЕЖДУ КАВЫЧКАМИ НИЖЕ.
-# Старый токен, который уже отправлялся в чат, сначала отзови
-# в @BotFather командой /revoke.
-# ==========================================================
+# ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-ADMIN_ID = 1012040843
+ADMIN_ID = 1012040843  # 在这里填入你的管理员ID
+# ===================================
 
-# База данных создаётся рядом с этим файлом.
-# Если Bothost имеет постоянное хранилище, можно указать его путь,
-# например: DB_PATH = Path("/путь/к/persistent/nfts.sqlite3")
-DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
+DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
 
-if BOT_TOKEN == "ВСТАВЬ_СЮДА_НОВЫЙ_ТОКЕН" or not BOT_TOKEN.strip():
-    raise RuntimeError("Открой main.py и вставь токен в BOT_TOKEN")
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-)
-log = logging.getLogger("nft-bot")
+logging.basicConfig(level=logging.INFO)
+log = logging.getLogger("nft-gif-test")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-NFT_URL_RE = re.compile(
-    r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)",
-    re.IGNORECASE,
-)
+NFT_URL_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)", re.I)
+LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
 
 
 def db_connect():
@@ -58,125 +47,115 @@ def init_db():
                 model TEXT,
                 backdrop TEXT,
                 symbol TEXT,
-                description TEXT,
-                page_url TEXT NOT NULL,
-                photo_url TEXT NOT NULL,
-                added_by INTEGER,
+                page_url TEXT,
+                gif_file_id TEXT,
                 added_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
 
 def parse_slug(text):
-    match = NFT_URL_RE.search(text or "")
-    return match.group(1) if match else None
+    m = NFT_URL_RE.search(text or "")
+    return m.group(1) if m else None
 
 
 def clean_html(value):
     return " ".join(BeautifulSoup(value or "", "html.parser").get_text(" ", strip=True).split())
 
 
-def extract_metadata(page, slug):
+async def fetch_metadata(slug):
+    """从 t.me/nft 页面提取模型、背景、图案"""
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        async with session.get(f"https://t.me/nft/{slug}") as resp:
+            if resp.status != 200:
+                raise ValueError(f"页面返回 HTTP {resp.status}")
+            page = await resp.text()
+
     soup = BeautifulSoup(page, "html.parser")
-    description = ""
-
-    meta = soup.find("meta", attrs={"name": re.compile(r"^twitter:description$", re.I)})
-    if meta and meta.get("content"):
-        description = html.unescape(meta["content"]).strip()
-
-    if not description:
-        meta = soup.find("meta", attrs={"property": "og:description"})
-        if meta and meta.get("content"):
-            description = html.unescape(meta["content"]).strip()
-
     fields = {"model": "", "backdrop": "", "symbol": ""}
-    for key, label in (("model", "Model"), ("backdrop", "Backdrop"), ("symbol", "Symbol")):
-        pattern = (
-            rf"{label}:\s*(.*?)"
-            rf"(?=\s+(?:Model|Backdrop|Symbol|Comment|Owner|Quantity):|$)"
-        )
-        found = re.search(pattern, description, re.I)
-        if found:
-            fields[key] = found.group(1).strip()
 
-    # Попытка извлечь характеристики из HTML-таблицы.
     for row in soup.find_all("tr"):
         cells = row.find_all(["th", "td"])
         if len(cells) < 2:
             continue
         key = clean_html(str(cells[0])).lower().rstrip(":")
-        value = clean_html(str(cells[1]))
-        if key in fields and value:
-            fields[key] = value
-
-    title = ""
-    og_title = soup.find("meta", attrs={"property": "og:title"})
-    if og_title and og_title.get("content"):
-        title = html.unescape(og_title["content"]).strip()
-    if not title:
-        title_tag = soup.find("title")
-        title = clean_html(str(title_tag)) if title_tag else slug
+        val = clean_html(str(cells[1]))
+        if key in fields and val:
+            fields[key] = val
 
     return {
         "slug": slug,
-        "title": title,
+        "title": slug,
         "model": fields["model"],
         "backdrop": fields["backdrop"],
         "symbol": fields["symbol"],
-        "description": description,
         "page_url": f"https://t.me/nft/{slug}",
-        "photo_url": f"https://nft.fragment.com/gift/{slug}.small.jpg",
     }
 
 
-async def fetch_nft(slug):
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 Chrome/131.0 Safari/537.36"
+async def lottie_to_gif_file_id(slug: str) -> str:
+    """
+    下载 Lottie JSON → 用 python-lottie 转 GIF → 发送获取 file_id
+    注意：python-lottie 不保证能正确渲染所有 Fragment 动画
+    """
+    try:
+        import lottie
+        from lottie.exporters.gif import export_gif
+    except ImportError:
+        raise RuntimeError(
+            "python-lottie 未安装。请在 requirements.txt 中添加：lottie[GIF]"
         )
-    }
-    timeout = aiohttp.ClientTimeout(total=25)
 
-    async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(f"https://t.me/nft/{slug}", allow_redirects=True) as response:
-            if response.status != 200:
-                raise ValueError(f"Страница NFT вернула HTTP {response.status}")
-            page = await response.text()
+    url = LOTTIE_URL.format(slug=slug)
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise ValueError(f"Lottie 下载失败: HTTP {resp.status}")
+            lottie_data = await resp.read()
 
-        data = extract_metadata(page, slug)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        json_path = os.path.join(tmpdir, "anim.json")
+        gif_path = os.path.join(tmpdir, "anim.gif")
 
-        # Проверяем, что миниатюра Fragment действительно доступна.
-        async with session.get(data["photo_url"]) as response:
-            content_type = response.headers.get("Content-Type", "").lower()
-            if response.status != 200 or not content_type.startswith("image/"):
-                raise ValueError(
-                    "Не удалось получить миниатюру Fragment. "
-                    "Проверь ссылку или попробуй позже."
-                )
-        return data
+        with open(json_path, "wb") as f:
+            f.write(lottie_data)
+
+        # 加载并导出 GIF
+        animation = lottie.importers.load(json_path)
+        export_gif(animation, gif_path, skip_frames=2, dpi=64)
+
+        if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
+            raise RuntimeError("GIF 文件生成失败（可能 Lottie 格式不兼容）")
+
+        with open(gif_path, "rb") as gif_file:
+            msg = await bot.send_animation(
+                chat_id=ADMIN_ID,
+                animation=gif_file,
+                caption=f"测试 GIF: {slug}",
+            )
+
+        if not msg.animation:
+            raise RuntimeError("Telegram 未返回 animation 对象")
+
+        return msg.animation.file_id
 
 
-def save_nft(data, user_id):
+def save_nft(data, gif_file_id, user_id):
     with db_connect() as conn:
         conn.execute("""
-            INSERT INTO nfts
-            (slug, title, model, backdrop, symbol, description,
-             page_url, photo_url, added_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 title=excluded.title,
                 model=excluded.model,
                 backdrop=excluded.backdrop,
                 symbol=excluded.symbol,
-                description=excluded.description,
                 page_url=excluded.page_url,
-                photo_url=excluded.photo_url,
-                added_by=excluded.added_by
+                gif_file_id=excluded.gif_file_id
         """, (
-            data["slug"], data["title"], data["model"], data["backdrop"],
-            data["symbol"], data["description"], data["page_url"],
-            data["photo_url"], user_id
+            data["slug"], data["title"], data["model"],
+            data["backdrop"], data["symbol"], data["page_url"], gif_file_id
         ))
 
 
@@ -186,103 +165,90 @@ def get_nfts(query="", limit=50):
             q = f"%{query.strip()}%"
             rows = conn.execute("""
                 SELECT * FROM nfts
-                WHERE slug LIKE ? OR title LIKE ? OR model LIKE ?
-                   OR backdrop LIKE ? OR symbol LIKE ?
+                WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ?
                 ORDER BY added_at DESC LIMIT ?
-            """, (q, q, q, q, q, limit)).fetchall()
+            """, (q, q, q, q, limit)).fetchall()
         else:
             rows = conn.execute(
                 "SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?", (limit,)
             ).fetchall()
-    return [dict(row) for row in rows]
+    return [dict(r) for r in rows]
 
 
 def format_caption(nft):
-    slug = html.escape(nft.get("slug") or "")
-    model = html.escape(nft.get("model") or "Не найдено")
-    backdrop = html.escape(nft.get("backdrop") or "Не найдено")
-    symbol = html.escape(nft.get("symbol") or "Не найдено")
-    page_url = html.escape(nft.get("page_url") or "https://t.me")
     return (
-        f"<b>🎁 {slug}</b>\n\n"
-        f"🧩 <b>Модель:</b> {model}\n"
-        f"🎨 <b>Фон:</b> {backdrop}\n"
-        f"🔣 <b>Pattern:</b> {symbol}\n\n"
-        f"<a href=\"{page_url}\">Открыть NFT</a>"
+        f"<b>🎁 {html.escape(nft['slug'])}</b>\n\n"
+        f"🧩 <b>Модель:</b> {html.escape(nft.get('model') or '—')}\n"
+        f"🎨 <b>Фон:</b> {html.escape(nft.get('backdrop') or '—')}\n"
+        f"🔣 <b>Pattern:</b> {html.escape(nft.get('symbol') or '—')}\n\n"
+        f"<a href=\"{html.escape(nft['page_url'])}\">Открыть NFT</a>"
     )
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "Привет! 🎁\n\n"
-        "Отправь ссылку на NFT-подарок, например:\n"
-        "<code>https://t.me/nft/astralshard-1</code>\n\n"
-        "После сохранения ищи его в любом чате:\n"
-        "<code>@ИмяБота</code> — все сохранённые NFT\n"
-        "<code>@ИмяБота astralshard-1</code> — поиск по запросу.\n\n"
-        "Добавлять NFT может только администратор.",
+        "🧪 <b>Тест GIF</b>\n\n"
+        "Отправь ссылку на NFT:\n"
+        "<code>https://t.me/nft/название-номер</code>\n\n"
+        "Бот попробует скачать Lottie, конвертировать в GIF и сохранить.\n"
+        "Если получится — ищи в inline-режиме.",
         parse_mode="HTML",
     )
-
-
-@dp.message(Command("help"))
-async def help_command(message: Message):
-    await start(message)
 
 
 @dp.message(F.text)
 async def handle_text(message: Message):
     slug = parse_slug(message.text or "")
     if not slug:
-        await message.answer("Отправь ссылку вида https://t.me/nft/название-номер")
+        await message.answer("❌ Отправь ссылку вида https://t.me/nft/xxx-1")
         return
 
     if not message.from_user or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Добавлять NFT может только администратор.")
+        await message.answer("⛔ Только администратор.")
         return
 
-    status = await message.answer("🔎 Получаю данные NFT…")
+    status = await message.answer("🔎 Получаю метаданные…")
+
     try:
-        data = await fetch_nft(slug)
-        save_nft(data, message.from_user.id)
+        data = await fetch_metadata(slug)
+        await status.edit_text("🎬 Конвертирую Lottie → GIF (это может занять время)…")
+
+        gif_file_id = await lottie_to_gif_file_id(slug)
+        save_nft(data, gif_file_id, message.from_user.id)
+
         await status.edit_text(
-            "✅ <b>Готово! NFT сохранён.</b>\n\n"
+            f"✅ <b>成功！</b>\n\n"
             f"🎁 {html.escape(slug)}\n"
-            f"🧩 Модель: {html.escape(data['model'] or 'не найдена')}\n"
-            f"🎨 Фон: {html.escape(data['backdrop'] or 'не найден')}\n"
-            f"🔣 Pattern: {html.escape(data['symbol'] or 'не найден')}\n\n"
-            "Теперь найди его через Inline Mode.",
+            f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
+            f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
+            f"🔣 Patternhtml: {html.escape(data['symbol.'] or '—')}\n\n"
+            f"file_idescape: <code>{gif_file_id[:50(str]}…</code>\n\n"
+            f(ex"Теперь проверь inline-режим: @cтвой_бот",
             parse_mode="HTML",
         )
     except Exception as exc:
-        log.exception("Не удалось сохранить NFT %s", slug)
+        log.exception("失败: %s", slug)
         await status.edit_text(
-            "❌ Не удалось сохранить NFT.\n"
-            f"<code>{html.escape(str(exc)[:400])}</code>",
+            f"❌ <b>失败</b>\n\n"
+            f"<code>{)[:500])}</code>\n\n"
+            f"如果错误是格式不兼容/空 GIF，说明 python-lottie 无法渲染这个动画。",
             parse_mode="HTML",
         )
 
 
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
-    search_text = (query.query or "").strip()
-    items = get_nfts(search_text, limit=50)
+    items = get_nfts(query.query.strip(), limit=50)
     results = []
 
     for nft in items:
-        slug = nft["slug"]
+        if not nft.get("gif_file_id"):
+            continue
         results.append(
-            InlineQueryResultPhoto(
-                id=slug,
-                photo_url=nft["photo_url"],
-                thumbnail_url=nft["photo_url"],
-                title=nft.get("title") or slug,
-                description=(
-                    f"Модель: {nft.get('model') or '—'} | "
-                    f"Фон: {nft.get('backdrop') or '—'} | "
-                    f"Pattern: {nft.get('symbol') or '—'}"
-                )[:250],
+            InlineQueryResultCachedGif(
+                id=nft["slug"],
+                gif_file_id=nft["gif_file_id"],
                 caption=format_caption(nft),
                 parse_mode="HTML",
             )
@@ -294,8 +260,8 @@ async def inline_search(query: InlineQuery):
 async def main():
     init_db()
     me = await bot.get_me()
-    log.info("Бот запущен: @%s; admin_id=%s; database=%s", me.username, ADMIN_ID, DB_PATH)
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    log.info("Бот @%s запущен, admin=%s", me.username, ADMIN_ID)
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
