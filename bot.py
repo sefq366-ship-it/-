@@ -1,4 +1,3 @@
-
 import asyncio
 import html
 import logging
@@ -16,7 +15,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 
 # ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-ADMIN_ID = 1012040843  # 在这里填入你的管理员ID
+ADMIN_ID = 1012040843
 # ===================================
 
 DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
@@ -64,7 +63,6 @@ def clean_html(value):
 
 
 async def fetch_metadata(slug):
-    """从 t.me/nft 页面提取模型、背景、图案"""
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(f"https://t.me/nft/{slug}") as resp:
@@ -94,18 +92,12 @@ async def fetch_metadata(slug):
     }
 
 
-async def lottie_to_gif_file_id(slug: str) -> str:
-    """
-    下载 Lottie JSON → 用 python-lottie 转 GIF → 发送获取 file_id
-    注意：python-lottie 不保证能正确渲染所有 Fragment 动画
-    """
+async def lottie_to_gif_file_id(slug):
     try:
         import lottie
         from lottie.exporters.gif import export_gif
     except ImportError:
-        raise RuntimeError(
-            "python-lottie 未安装。请在 requirements.txt 中添加：lottie[GIF]"
-        )
+        raise RuntimeError("python-lottie 未安装。请在 requirements.txt 中添加：lottie[GIF]")
 
     url = LOTTIE_URL.format(slug=slug)
     async with aiohttp.ClientSession() as session:
@@ -121,7 +113,6 @@ async def lottie_to_gif_file_id(slug: str) -> str:
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        # 加载并导出 GIF
         animation = lottie.importers.load(json_path)
         export_gif(animation, gif_path, skip_frames=2, dpi=64)
 
@@ -191,8 +182,7 @@ async def start(message: Message):
         "🧪 <b>Тест GIF</b>\n\n"
         "Отправь ссылку на NFT:\n"
         "<code>https://t.me/nft/название-номер</code>\n\n"
-        "Бот попробует скачать Lottie, конвертировать в GIF и сохранить.\n"
-        "Если получится — ищи в inline-режиме.",
+        "Бот попробует скачать Lottie, конвертировать в GIF и сохранить.",
         parse_mode="HTML",
     )
 
@@ -222,17 +212,17 @@ async def handle_text(message: Message):
             f"🎁 {html.escape(slug)}\n"
             f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
             f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
-            f"🔣 Patternhtml: {html.escape(data['symbol.'] or '—')}\n\n"
-            f"file_idescape: <code>{gif_file_id[:50(str]}…</code>\n\n"
-            f(ex"Теперь проверь inline-режим: @cтвой_бот",
+            f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
+            f"file_id: <code>{gif_file_id[:50]}…</code>\n\n"
+            f"Теперь проверь inline-режим: @твой_бот",
             parse_mode="HTML",
         )
     except Exception as exc:
         log.exception("失败: %s", slug)
         await status.edit_text(
             f"❌ <b>失败</b>\n\n"
-            f"<code>{)[:500])}</code>\n\n"
-            f"如果错误是格式不兼容/空 GIF，说明 python-lottie 无法渲染这个动画。",
+            f"<code>{html.escape(str(exc)[:500])}</code>\n\n"
+            f"Если ошибка — формат несовместим/пустой GIF.",
             parse_mode="HTML",
         )
 
