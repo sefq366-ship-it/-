@@ -93,11 +93,11 @@ async def fetch_metadata(slug):
 
 
 async def lottie_to_gif_file_id(slug, chat_id):
-    """Скачать Lottie → конвертировать в GIF через pyrlottie → отправить → вернуть file_id."""
+    """Скачать Lottie → конвертировать в GIF через rlottie-python → отправить → вернуть file_id."""
     try:
-        from pyrlottie import convSingleLottie, LottieFile, FileMap, run
+        from rlottie_python import LottieAnimation
     except ImportError:
-        raise RuntimeError("pyrlottie не установлен. Добавь в requirements.txt: pyrlottie")
+        raise RuntimeError("rlottie-python не установлен. Добавь в requirements.txt: rlottie-python[full]")
 
     url = LOTTIE_URL.format(slug=slug)
     async with aiohttp.ClientSession() as session:
@@ -113,23 +113,16 @@ async def lottie_to_gif_file_id(slug, chat_id):
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        def _run_pyrlottie():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                # convSingleLottie принимает итерируемый объект (список) с FileMap
-                return run(
-                    convSingleLottie(
-                        [FileMap(LottieFile(json_path), {gif_path})]
-                    )
-                )
-            finally:
-                loop.close()
+        def _convert():
+            # rlottie-python 直接调用内置 C++ 库，不依赖 cairo，也不依赖 asyncio
+            anim = LottieAnimation.from_file(json_path)
+            anim.save_animation(gif_path)
+            anim.lottie_animation_destroy()
 
-        await asyncio.to_thread(_run_pyrlottie)
+        await asyncio.to_thread(_convert)
 
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
-            raise RuntimeError("GIF не создан (возможно, Lottie несовместим с pyrlottie)")
+            raise RuntimeError("GIF не создан (возможно, Lottie несовместим с rlottie)")
 
         with open(gif_path, "rb") as gif_file:
             msg = await bot.send_animation(
