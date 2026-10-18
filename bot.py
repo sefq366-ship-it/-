@@ -16,7 +16,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 
 # ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-ADMIN_ID = 123456789
+ADMIN_ID = 1012040843
 # ===================================
 
 DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
