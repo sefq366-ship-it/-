@@ -20,6 +20,7 @@ from aiogram.types import (
     Message,
     InlineQuery,
     InlineQueryResultCachedGif,
+    InlineQueryResultCachedMpeg4Gif,
     FSInputFile,
 )
 from aiogram.exceptions import TelegramUnauthorizedError
@@ -28,66 +29,58 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # НАСТРОЙКИ
 # ============================================================
 
-# Токен бота. Вставь свой токен от @BotFather прямо сюда,
-# в кавычки. Переменные окружения не используем,
-# т.к. хостинг плохо работает с env-переменными.
-BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
+BOT_TOKEN = "8977910657:AAG9zbaj4CK-39uNSp0VAA_1yEiH5cb_wQE"
 
-VERSION = "v3.2 Max Quality"
+VERSION = "v4.2 MP4 Inline (system ffmpeg)"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
 # Максимальная сторона ИТОГОВОГО изображения.
-# Важно: Telegram перекодирует тяжёлые GIF на своей стороне,
-# поэтому 1024 обычно выглядит ЛУЧШЕ, чем 2048 (меньше жатия).
-# Можешь поэкспериментировать: 512 / 1024 / 2048.
 MAX_RENDER_DIMENSION = 1024
 
-# Максимальная частота воспроизведения GIF.
+# Максимальная частота воспроизведения.
 MAX_FPS = 60
 
-# Ограничение длительности.
-# 0 = без ограничения.
+# Ограничение длительности. 0 = без ограничения.
 MAX_DURATION_SECONDS = 0
 
-# Качество Gifski (100 = максимум).
+# Качество Gifski.
 GIF_QUALITY = 100
 GIF_MOTION_QUALITY = 100
 GIF_LOSSY_QUALITY = 100
 
-# Дополнительное усилие сжатия gifski (--extra).
-# True = медленнее, но файл меньше -> Telegram меньше пережимает.
-# False = быстрее, файл больше.
+# Дополнительное усилие сжатия gifski.
 GIF_EXTRA_COMPRESSION = True
 
-# Суперсэмплинг: рендерим кадры в SSAA_FACTOR раз крупнее итогового
-# размера, затем даунскейлим через LANCZOS.
-# Это убирает "лесенки" на краях и делает градиенты заметно чище.
-# 1 = выключено, 2 = рекомендуется, 3 = очень медленно.
+# Суперсэмплинг.
 SSAA_FACTOR = 2
-
-# Жёсткий потолок стороны кадра при рендере (до даунскейла).
 SSAA_MAX_DIMENSION = 4096
 
-# Дублировать отправку оригинальным документом (.gif файлом).
-# Telegram НЕ перекодирует документы — пользователь получит файл
-# в точности таким, какой получился у gifski.
-# True = отправит и анимацию, и документ. False = только анимацию.
+# --- MP4 / ffmpeg ---
+# CRF для x264: меньше = лучше качество, больше = меньше файл.
+MP4_CRF = 17
+# preset x264.
+MP4_PRESET = "slow"
+# Профиль и уровень H.264.
+MP4_PROFILE = "high"
+MP4_LEVEL = "4.2"
+# Пиксельный формат (обязателен для совместимости).
+MP4_PIX_FMT = "yuv420p"
+
+# Отправлять в чат MP4 как анимацию + оригинальный GIF документом.
+SEND_ANIMATION_MP4 = True
 SEND_ORIGINAL_AS_DOCUMENT = True
 
-# Число одновременных конвертаций.
+# Одновременные конвертации.
 MAX_CONCURRENT_RENDERS = 1
 
 # Тайм-ауты.
 DOWNLOAD_TIMEOUT = 120
 RENDER_TIMEOUT = 1800
+FFMPEG_TIMEOUT = 1800
 
-# Ограничение исходного JSON.
 MAX_LOTTIE_SIZE = 100 * 1024 * 1024
-
-# Ограничение размера GIF.
-# 0 = без собственного ограничения.
 MAX_GIF_SIZE_BYTES = 0
 
 # ============================================================
@@ -148,9 +141,7 @@ def db_connect():
         DB_PATH,
         timeout=30,
     )
-
     conn.row_factory = sqlite3.Row
-
     return conn
 
 def init_db():
@@ -171,16 +162,32 @@ def init_db():
                 symbol TEXT,
                 page_url TEXT,
                 gif_file_id TEXT,
+                mpeg4_file_id TEXT,
                 added_by INTEGER,
                 added_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
+        # Миграция со старой схемы.
+        cols = {
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(nfts)"
+            ).fetchall()
+        }
+
+        if "mpeg4_file_id" not in cols:
+            conn.execute(
+                "ALTER TABLE nfts ADD COLUMN mpeg4_file_id TEXT"
+            )
+            log.info(
+                "База обновлена: добавлено поле mpeg4_file_id."
+            )
+
         conn.commit()
 
 def parse_slug(text):
     match = NFT_URL_RE.search(text or "")
-
     return match.group(1) if match else None
 
 def clean_html(value):
@@ -194,7 +201,7 @@ def clean_html(value):
         ).split()
     )
 
-def save_nft(data, gif_file_id, user_id):
+def save_nft(data, gif_file_id, mpeg4_file_id, user_id):
     with db_connect() as conn:
         conn.execute("""
             INSERT INTO nfts (
@@ -205,9 +212,10 @@ def save_nft(data, gif_file_id, user_id):
                 symbol,
                 page_url,
                 gif_file_id,
+                mpeg4_file_id,
                 added_by
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 
             ON CONFLICT(slug) DO UPDATE SET
                 title = excluded.title,
@@ -215,7 +223,14 @@ def save_nft(data, gif_file_id, user_id):
                 backdrop = excluded.backdrop,
                 symbol = excluded.symbol,
                 page_url = excluded.page_url,
-                gif_file_id = excluded.gif_file_id,
+                gif_file_id = COALESCE(
+                    excluded.gif_file_id,
+                    nfts.gif_file_id
+                ),
+                mpeg4_file_id = COALESCE(
+                    excluded.mpeg4_file_id,
+                    nfts.mpeg4_file_id
+                ),
                 added_by = excluded.added_by
         """, (
             data["slug"],
@@ -225,6 +240,7 @@ def save_nft(data, gif_file_id, user_id):
             data["symbol"],
             data["page_url"],
             gif_file_id,
+            mpeg4_file_id,
             user_id,
         ))
 
@@ -269,23 +285,15 @@ def get_nfts(query="", limit=50):
                 LIMIT ?
             """, (limit,)).fetchall()
 
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return [dict(row) for row in rows]
 
 # ============================================================
 # МЕТАДАННЫЕ NFT
 # ============================================================
 
 async def fetch_metadata(slug):
-    timeout = aiohttp.ClientTimeout(
-        total=30,
-    )
-
-    headers = {
-        "User-Agent": USER_AGENT,
-    }
+    timeout = aiohttp.ClientTimeout(total=30)
+    headers = {"User-Agent": USER_AGENT}
 
     async with aiohttp.ClientSession(
         timeout=timeout,
@@ -303,10 +311,7 @@ async def fetch_metadata(slug):
 
             page = await resp.text()
 
-    soup = BeautifulSoup(
-        page,
-        "html.parser",
-    )
+    soup = BeautifulSoup(page, "html.parser")
 
     fields = {
         "model": "",
@@ -315,10 +320,7 @@ async def fetch_metadata(slug):
     }
 
     for row in soup.find_all("tr"):
-        cells = row.find_all([
-            "th",
-            "td",
-        ])
+        cells = row.find_all(["th", "td"])
 
         if len(cells) < 2:
             continue
@@ -327,9 +329,7 @@ async def fetch_metadata(slug):
             str(cells[0])
         ).lower().rstrip(":")
 
-        value = clean_html(
-            str(cells[1])
-        )
+        value = clean_html(str(cells[1]))
 
         if key in fields and value:
             fields[key] = value
@@ -344,7 +344,7 @@ async def fetch_metadata(slug):
     }
 
 # ============================================================
-# ПРОВЕРКА GIFSKI
+# ПРОВЕРКА ИНСТРУМЕНТОВ
 # ============================================================
 
 def check_gifski():
@@ -358,17 +358,25 @@ def check_gifski():
 
     return executable
 
+def check_ffmpeg():
+    executable = shutil.which("ffmpeg")
+
+    if not executable:
+        raise RuntimeError(
+            "Не найден ffmpeg. "
+            "Установи ffmpeg (например: apt install ffmpeg)."
+        )
+
+    log.info("ffmpeg найден: %s", executable)
+
+    return executable
+
 # ============================================================
 # ЗАГРУЗКА LOTTIE
 # ============================================================
 
-async def download_lottie(
-    slug,
-    output_path,
-):
-    url = LOTTIE_URL.format(
-        slug=slug,
-    )
+async def download_lottie(slug, output_path):
+    url = LOTTIE_URL.format(slug=slug)
 
     timeout = aiohttp.ClientTimeout(
         total=DOWNLOAD_TIMEOUT,
@@ -386,9 +394,7 @@ async def download_lottie(
         headers=headers,
     ) as session:
 
-        async with session.get(
-            url,
-        ) as resp:
+        async with session.get(url) as resp:
 
             if resp.status != 200:
                 raise ValueError(
@@ -416,17 +422,12 @@ async def download_lottie(
     )
 
 # ============================================================
-# LOTTIE -> PNG -> GIF (максимальное качество)
+# LOTTIE -> PNG -> GIF -> MP4
 # ============================================================
 
-def convert_lottie_to_gif_sync(
-    json_path,
-    gif_path,
-    work_dir,
-):
+def convert_lottie_to_gif_sync(json_path, gif_path, work_dir):
     try:
         from rlottie_python import LottieAnimation
-
     except ImportError as exc:
         raise RuntimeError(
             "Не установлена rlottie-python. "
@@ -434,25 +435,18 @@ def convert_lottie_to_gif_sync(
         ) from exc
 
     gifski = check_gifski()
-
     anim = None
 
     try:
-        anim = LottieAnimation.from_file(
-            str(json_path)
-        )
+        anim = LottieAnimation.from_file(str(json_path))
 
-        orig_w, orig_h = (
-            anim.lottie_animation_get_size()
-        )
-
+        orig_w, orig_h = anim.lottie_animation_get_size()
         orig_w = int(orig_w)
         orig_h = int(orig_h)
 
         total_frames = int(
             anim.lottie_animation_get_totalframe()
         )
-
         original_fps = float(
             anim.lottie_animation_get_framerate()
         )
@@ -463,9 +457,7 @@ def convert_lottie_to_gif_sync(
             )
 
         if total_frames <= 0:
-            raise RuntimeError(
-                "В анимации нет кадров."
-            )
+            raise RuntimeError("В анимации нет кадров.")
 
         if not math.isfinite(original_fps) or original_fps <= 0:
             raise RuntimeError(
@@ -483,46 +475,24 @@ def convert_lottie_to_gif_sync(
                 "Превышено допустимое время."
             )
 
-        # Не увеличиваем частоту кадров искусственно,
-        # но и не теряем кадр из-за округления вниз.
         fps = max(
             1,
-            min(
-                math.ceil(original_fps),
-                MAX_FPS,
-            ),
+            min(math.ceil(original_fps), MAX_FPS),
         )
 
-        # Масштабирование с сохранением пропорций.
-        scale = (
-            MAX_RENDER_DIMENSION
-            / max(orig_w, orig_h)
-        )
+        scale = MAX_RENDER_DIMENSION / max(orig_w, orig_h)
+        out_w = max(1, round(orig_w * scale))
+        out_h = max(1, round(orig_h * scale))
 
-        out_w = max(
-            1,
-            round(orig_w * scale),
-        )
-
-        out_h = max(
-            1,
-            round(orig_h * scale),
-        )
-
-        # Суперсэмплинг: рендерим крупнее итогового размера,
-        # потом даунскейлим через LANCZOS. Так края и
-        # градиенты получаются заметно чище.
         if SSAA_FACTOR > 1:
             render_w = min(
                 out_w * SSAA_FACTOR,
                 SSAA_MAX_DIMENSION,
             )
-
             render_h = min(
                 out_h * SSAA_FACTOR,
                 SSAA_MAX_DIMENSION,
             )
-
         else:
             render_w = out_w
             render_h = out_h
@@ -543,19 +513,12 @@ def convert_lottie_to_gif_sync(
         )
 
         frames_dir = work_dir / "frames"
-
-        frames_dir.mkdir(
-            parents=True,
-            exist_ok=True,
-        )
+        frames_dir.mkdir(parents=True, exist_ok=True)
 
         frame_files = []
 
         for i in range(total_frames):
-            frame_path = (
-                frames_dir
-                / f"frame_{i:06d}.png"
-            )
+            frame_path = frames_dir / f"frame_{i:06d}.png"
 
             frame_img = anim.render_pillow_frame(
                 frame_num=i,
@@ -564,8 +527,6 @@ def convert_lottie_to_gif_sync(
             )
 
             try:
-                # Даунскейл через LANCZOS — лучшее качество
-                # ресемплинга, которое даёт Pillow.
                 if (render_w, render_h) != (out_w, out_h):
                     frame_img = frame_img.resize(
                         (out_w, out_h),
@@ -580,17 +541,12 @@ def convert_lottie_to_gif_sync(
 
             finally:
                 close_method = getattr(
-                    frame_img,
-                    "close",
-                    None,
+                    frame_img, "close", None
                 )
-
                 if callable(close_method):
                     close_method()
 
-            frame_files.append(
-                str(frame_path)
-            )
+            frame_files.append(str(frame_path))
 
             if (i + 1) % 100 == 0:
                 log.info(
@@ -599,30 +555,20 @@ def convert_lottie_to_gif_sync(
                     total_frames,
                 )
 
-        # Освобождаем ресурсы rlottie.
         destroy = getattr(
-            anim,
-            "lottie_animation_destroy",
-            None,
+            anim, "lottie_animation_destroy", None
         )
-
         if callable(destroy):
             destroy()
-
         anim = None
 
         cmd = [
             gifski,
-            "--output",
-            str(gif_path),
-            "--fps",
-            str(fps),
-            "--quality",
-            str(GIF_QUALITY),
-            "--motion-quality",
-            str(GIF_MOTION_QUALITY),
-            "--lossy-quality",
-            str(GIF_LOSSY_QUALITY),
+            "--output", str(gif_path),
+            "--fps", str(fps),
+            "--quality", str(GIF_QUALITY),
+            "--motion-quality", str(GIF_MOTION_QUALITY),
+            "--lossy-quality", str(GIF_LOSSY_QUALITY),
         ]
 
         if GIF_EXTRA_COMPRESSION:
@@ -649,16 +595,12 @@ def convert_lottie_to_gif_sync(
             )
 
         if not gif_path.exists():
-            raise RuntimeError(
-                "Gifski не создал GIF."
-            )
+            raise RuntimeError("Gifski не создал GIF.")
 
         gif_size = gif_path.stat().st_size
 
         if gif_size <= 0:
-            raise RuntimeError(
-                "Итоговый GIF пуст."
-            )
+            raise RuntimeError("Итоговый GIF пуст.")
 
         if (
             MAX_GIF_SIZE_BYTES > 0
@@ -688,38 +630,105 @@ def convert_lottie_to_gif_sync(
     finally:
         if anim is not None:
             destroy = getattr(
-                anim,
-                "lottie_animation_destroy",
-                None,
+                anim, "lottie_animation_destroy", None
             )
-
             if callable(destroy):
                 try:
                     destroy()
-
                 except Exception:
                     log.exception(
                         "Ошибка освобождения Lottie."
                     )
 
-async def lottie_to_gif_file_id(
-    slug,
-    chat_id,
+
+def convert_gif_to_mp4_sync(
+    gif_path: Path,
+    mp4_path: Path,
+    fps: float,
+    size: int,
 ):
+    """
+    Конвертация GIF -> MP4 (H.264, без звука).
+    yuv420p обязателен для совместимости с Telegram.
+    """
+    ffmpeg = check_ffmpeg()
+
+    # scale=size:-2 гарантирует чётные размеры (требование H.264).
+    vf = (
+        f"scale='min({size},iw)':-2:flags=lanczos,"
+        f"pad=ceil(iw/2)*2:ceil(ih/2)*2"
+    )
+
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i", str(gif_path),
+        "-an",
+        "-c:v", "libx264",
+        "-preset", MP4_PRESET,
+        "-crf", str(MP4_CRF),
+        "-profile:v", MP4_PROFILE,
+        "-level", MP4_LEVEL,
+        "-pix_fmt", MP4_PIX_FMT,
+        "-vf", vf,
+        "-movflags", "+faststart",
+        "-r", str(fps),
+        str(mp4_path),
+    ]
+
+    log.info(
+        "Конвертация в MP4: crf=%s preset=%s profile=%s",
+        MP4_CRF,
+        MP4_PRESET,
+        MP4_PROFILE,
+    )
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=FFMPEG_TIMEOUT,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "Ошибка ffmpeg: "
+            + (
+                result.stderr
+                or result.stdout
+                or "неизвестная ошибка"
+            )[-2000:]
+        )
+
+    if not mp4_path.exists() or mp4_path.stat().st_size <= 0:
+        raise RuntimeError("ffmpeg не создал MP4.")
+
+    log.info(
+        "MP4 готов: %.2f МБ",
+        mp4_path.stat().st_size / 1024 / 1024,
+    )
+
+
+# ============================================================
+# ГЕНЕРАЦИЯ И ОТПРАВКА
+# ============================================================
+
+async def lottie_to_file_ids(slug, chat_id):
+    """
+    Возвращает (gif_file_id, mpeg4_file_id).
+    """
     async with render_semaphore:
         with tempfile.TemporaryDirectory(
             prefix="nft_gif_",
         ) as tmp:
 
             work_dir = Path(tmp)
-
             json_path = work_dir / "anim.json"
             gif_path = work_dir / "anim.gif"
+            mp4_path = work_dir / "anim.mp4"
 
-            await download_lottie(
-                slug,
-                json_path,
-            )
+            await download_lottie(slug, json_path)
 
             info = await asyncio.to_thread(
                 convert_lottie_to_gif_sync,
@@ -728,33 +737,81 @@ async def lottie_to_gif_file_id(
                 work_dir,
             )
 
-            log.info(
-                "Отправка в Telegram: %s, "
-                "%sx%s, %.2f МБ",
-                slug,
-                info["width"],
-                info["height"],
-                info["size"] / 1024 / 1024,
-            )
+            # GIF -> MP4
+            try:
+                await asyncio.to_thread(
+                    convert_gif_to_mp4_sync,
+                    gif_path,
+                    mp4_path,
+                    float(info["fps"]),
+                    int(max(info["width"], info["height"])),
+                )
+            except Exception:
+                log.exception(
+                    "Не удалось сконвертировать в MP4, "
+                    "работаем без MP4: %s",
+                    slug,
+                )
+                mp4_path = None
 
-            msg = await bot.send_animation(
-                chat_id=chat_id,
-                animation=FSInputFile(
-                    str(gif_path),
-                    filename=f"{slug}.gif",
-                ),
-                caption=f"NFT: {slug}",
-            )
+            gif_file_id = None
+            mpeg4_file_id = None
 
-            if not msg.animation:
-                raise RuntimeError(
-                    "Telegram не вернул animation."
+            # Основная анимация в чат.
+            if SEND_ANIMATION_MP4 and mp4_path is not None:
+                log.info(
+                    "Отправка MP4 в Telegram: %s, %.2f МБ",
+                    slug,
+                    mp4_path.stat().st_size / 1024 / 1024,
                 )
 
-            # Дублируем оригинальным файлом-документом:
-            # документы Telegram НЕ перекодирует,
-            # пользователь получает GIF в точности таким,
-            # какой получился у gifski.
+                try:
+                    msg = await bot.send_animation(
+                        chat_id=chat_id,
+                        animation=FSInputFile(
+                            str(mp4_path),
+                            filename=f"{slug}.mp4",
+                        ),
+                        caption=f"NFT: {slug}",
+                    )
+
+                    if msg.animation:
+                        mpeg4_file_id = msg.animation.file_id
+
+                except Exception:
+                    log.exception(
+                        "send_animation(MP4) не удался: %s",
+                        slug,
+                    )
+
+            # Fallback: GIF анимацией.
+            if mpeg4_file_id is None:
+                log.info(
+                    "Отправка GIF анимацией: %s, %.2f МБ",
+                    slug,
+                    info["size"] / 1024 / 1024,
+                )
+
+                try:
+                    msg = await bot.send_animation(
+                        chat_id=chat_id,
+                        animation=FSInputFile(
+                            str(gif_path),
+                            filename=f"{slug}.gif",
+                        ),
+                        caption=f"NFT: {slug}",
+                    )
+
+                    if msg.animation:
+                        gif_file_id = msg.animation.file_id
+
+                except Exception:
+                    log.exception(
+                        "send_animation(GIF) не удался: %s",
+                        slug,
+                    )
+
+            # Оригинальный GIF документом.
             if SEND_ORIGINAL_AS_DOCUMENT:
                 try:
                     await bot.send_document(
@@ -767,39 +824,26 @@ async def lottie_to_gif_file_id(
                             f"Оригинал без пережатия: {slug}"
                         ),
                     )
-
                 except Exception:
                     log.exception(
                         "Не удалось отправить документ: %s",
                         slug,
                     )
 
-            return msg.animation.file_id
+            return gif_file_id, mpeg4_file_id
+
 
 # ============================================================
 # ПОДПИСЬ NFT
 # ============================================================
 
 def format_caption(nft):
-    slug = html.escape(
-        nft.get("slug") or ""
-    )
-
-    model = html.escape(
-        nft.get("model") or "—"
-    )
-
-    backdrop = html.escape(
-        nft.get("backdrop") or "—"
-    )
-
-    symbol = html.escape(
-        nft.get("symbol") or "—"
-    )
-
+    slug = html.escape(nft.get("slug") or "")
+    model = html.escape(nft.get("model") or "—")
+    backdrop = html.escape(nft.get("backdrop") or "—")
+    symbol = html.escape(nft.get("symbol") or "—")
     page_url = html.escape(
-        nft.get("page_url") or "",
-        quote=True,
+        nft.get("page_url") or "", quote=True
     )
 
     return (
@@ -833,9 +877,7 @@ async def start(message: Message):
 
 @dp.message(F.text)
 async def handle_text(message: Message):
-    slug = parse_slug(
-        message.text or ""
-    )
+    slug = parse_slug(message.text or "")
 
     if not slug:
         await message.answer(
@@ -844,27 +886,33 @@ async def handle_text(message: Message):
         )
         return
 
-    lock = slug_locks.setdefault(
-        slug,
-        asyncio.Lock(),
-    )
+    lock = slug_locks.setdefault(slug, asyncio.Lock())
 
     async with lock:
         existing = get_nft(slug)
 
-        if existing and existing.get("gif_file_id"):
+        if existing and (
+            existing.get("mpeg4_file_id")
+            or existing.get("gif_file_id")
+        ):
             try:
-                await message.answer_animation(
-                    animation=existing["gif_file_id"],
-                    caption=format_caption(existing),
-                    parse_mode="HTML",
-                )
-
+                if existing.get("mpeg4_file_id"):
+                    await message.answer_animation(
+                        animation=existing["mpeg4_file_id"],
+                        caption=format_caption(existing),
+                        parse_mode="HTML",
+                    )
+                else:
+                    await message.answer_animation(
+                        animation=existing["gif_file_id"],
+                        caption=format_caption(existing),
+                        parse_mode="HTML",
+                    )
                 return
 
             except Exception:
                 log.exception(
-                    "Не удалось отправить сохранённый GIF: %s",
+                    "Не удалось отправить сохранённый файл: %s",
                     slug,
                 )
 
@@ -873,16 +921,15 @@ async def handle_text(message: Message):
         )
 
         try:
-            data = await fetch_metadata(
-                slug
-            )
+            data = await fetch_metadata(slug)
 
             await status.edit_text(
-                "🎬 Создаю GIF максимального качества...\n"
+                "🎬 Создаю анимацию максимального качества "
+                "(GIF + MP4)...\n"
                 "Пожалуйста, подожди."
             )
 
-            gif_file_id = await lottie_to_gif_file_id(
+            gif_file_id, mpeg4_file_id = await lottie_to_file_ids(
                 slug,
                 message.chat.id,
             )
@@ -890,6 +937,7 @@ async def handle_text(message: Message):
             save_nft(
                 data,
                 gif_file_id,
+                mpeg4_file_id,
                 message.from_user.id
                 if message.from_user
                 else 0,
@@ -923,7 +971,6 @@ async def handle_text(message: Message):
                     f"<code>{html.escape(str(exc)[:1200])}</code>",
                     parse_mode="HTML",
                 )
-
             except Exception:
                 log.exception(
                     "Не удалось отправить сообщение об ошибке."
@@ -931,48 +978,49 @@ async def handle_text(message: Message):
 
         finally:
             if slug_locks.get(slug) is lock:
-                slug_locks.pop(
-                    slug,
-                    None,
-                )
+                slug_locks.pop(slug, None)
 
 # ============================================================
 # INLINE-РЕЖИМ
 # ============================================================
 
 @dp.inline_query()
-async def inline_query_handler(
-    query: InlineQuery,
-):
-    search = (
-        query.query or ""
-    ).strip()
-
-    items = get_nfts(
-        search,
-        limit=50,
-    )
+async def inline_query_handler(query: InlineQuery):
+    search = (query.query or "").strip()
+    items = get_nfts(search, limit=50)
 
     results = []
 
     for nft in items:
-        if not nft.get("gif_file_id"):
+        if nft.get("mpeg4_file_id"):
+            results.append(
+                InlineQueryResultCachedMpeg4Gif(
+                    id=nft["slug"],
+                    mpeg4_file_id=nft["mpeg4_file_id"],
+                    caption=format_caption(nft),
+                    parse_mode="HTML",
+                )
+            )
             continue
 
-        results.append(
-            InlineQueryResultCachedGif(
-                id=nft["slug"],
-                gif_file_id=nft["gif_file_id"],
-                caption=format_caption(nft),
-                parse_mode="HTML",
+        if nft.get("gif_file_id"):
+            results.append(
+                InlineQueryResultCachedGif(
+                    id=nft["slug"],
+                    gif_file_id=nft["gif_file_id"],
+                    caption=format_caption(nft),
+                    parse_mode="HTML",
+                )
             )
-        )
 
-    await query.answer(
-        results=results,
-        cache_time=1,
-        is_personal=True,
-    )
+    try:
+        await query.answer(
+            results=results,
+            cache_time=1,
+            is_personal=True,
+        )
+    except Exception:
+        log.exception("Ошибка ответа на inline query")
 
 # ============================================================
 # ЗАПУСК И ЗАКРЫТИЕ СЕССИИ
@@ -981,12 +1029,11 @@ async def inline_query_handler(
 async def main():
     init_db()
 
-    log.info(
-        "Проверяю подключение к Telegram..."
-    )
+    log.info("Проверяю подключение к Telegram...")
 
     try:
         check_gifski()
+        check_ffmpeg()
 
         me = await bot.get_me()
 
@@ -994,17 +1041,18 @@ async def main():
             "Авторизация успешна. Бот @%s",
             me.username,
         )
-
-        log.info(
-            "Версия: %s",
-            VERSION,
-        )
-
+        log.info("Версия: %s", VERSION)
         log.info(
             "Разрешение рендера: до %s px "
             "(суперсэмплинг x%s)",
             MAX_RENDER_DIMENSION,
             SSAA_FACTOR,
+        )
+        log.info(
+            "MP4: crf=%s, preset=%s, profile=%s",
+            MP4_CRF,
+            MP4_PRESET,
+            MP4_PROFILE,
         )
 
         await dp.start_polling(
@@ -1017,27 +1065,18 @@ async def main():
             "Telegram отклонил токен. "
             "Проверь BOT_TOKEN в коде."
         )
-
         raise
 
     finally:
         await bot.session.close()
+        log.info("Сессия Telegram закрыта.")
 
-        log.info(
-            "Сессия Telegram закрыта."
-        )
 
 if __name__ == "__main__":
     try:
-        asyncio.run(
-            main()
-        )
-
+        asyncio.run(main())
     except KeyboardInterrupt:
-        log.info(
-            "Бот остановлен."
-        )
-
+        log.info("Бот остановлен.")
     except TelegramUnauthorizedError:
         log.critical(
             "Запуск невозможен: недействительный токен."
