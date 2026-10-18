@@ -11,11 +11,13 @@ import aiohttp
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
-from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
+from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSInputFile
 
 # ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ===================================
+
+VERSION = "v1.4 (rlottie-python + FSInputFile)"
 
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
@@ -114,7 +116,6 @@ async def lottie_to_gif_file_id(slug, chat_id):
             f.write(lottie_data)
 
         def _convert():
-            # rlottie-python 直接调用内置 C++ 库，不依赖 cairo，也不依赖 asyncio
             anim = LottieAnimation.from_file(json_path)
             anim.save_animation(gif_path)
             anim.lottie_animation_destroy()
@@ -124,12 +125,12 @@ async def lottie_to_gif_file_id(slug, chat_id):
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
             raise RuntimeError("GIF не создан (возможно, Lottie несовместим с rlottie)")
 
-        with open(gif_path, "rb") as gif_file:
-            msg = await bot.send_animation(
-                chat_id=chat_id,
-                animation=gif_file,
-                caption=f"🎁 {slug}",
-            )
+        gif_input = FSInputFile(gif_path, filename=f"{slug}.gif")
+        msg = await bot.send_animation(
+            chat_id=chat_id,
+            animation=gif_input,
+            caption=f"🎁 {slug}",
+        )
 
         if not msg.animation:
             raise RuntimeError("Telegram не вернул animation")
@@ -192,7 +193,8 @@ def format_caption(nft):
 async def start(message: Message):
     me = await bot.get_me()
     await message.answer(
-        "🎁 <b>NFT GIF Bot</b>\n\n"
+        f"🎁 <b>NFT GIF Bot</b>\n"
+        f"<i>{VERSION}</i>\n\n"
         "Отправь ссылку на NFT-подарок:\n"
         "<code>https://t.me/nft/название-номер</code>\n\n"
         "Бот скачает анимацию, конвертирует в GIF и сохранит.\n"
@@ -269,7 +271,7 @@ async def inline_search(query: InlineQuery):
 async def main():
     init_db()
     me = await bot.get_me()
-    log.info("Бот @%s запущен", me.username)
+    log.info("Бот @%s запущен, версия %s", me.username, VERSION)
     await dp.start_polling(bot)
 
 
