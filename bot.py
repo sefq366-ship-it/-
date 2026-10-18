@@ -117,10 +117,10 @@ async def lottie_to_gif_file_id(slug, chat_id):
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
+                # convSingleLottie принимает итерируемый объект (список) с FileMap
                 return run(
                     convSingleLottie(
-                        FileMap(LottieFile(json_path), {gif_path}),
-                        1,
+                        [FileMap(LottieFile(json_path), {gif_path})]
                     )
                 )
             finally:
