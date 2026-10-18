@@ -32,7 +32,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 BOT_TOKEN = "8977910657:AAG9zbaj4CK-39uNSp0VAA_1yEiH5cb_wQE"
 
-VERSION = "v5.1 Fast MP4"
+VERSION = "v5.5 Fast MP4"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
