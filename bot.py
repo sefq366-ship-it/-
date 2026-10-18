@@ -31,13 +31,13 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 BOT_TOKEN = "8977910657:AAG9zbaj4CK-39uNSp0VAA_1yEiH5cb_wQE"
 
-VERSION = "v4.2 MP4 Inline (system ffmpeg)"
+VERSION = "v4.3 Fast & Wide"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
-# Максимальная сторона ИТОГОВОГО изображения.
-MAX_RENDER_DIMENSION = 1024
+# УВЕЛИЧЕНО: Максимальная сторона изображения (1280px вместо 1024px)
+MAX_RENDER_DIMENSION = 1280
 
 # Максимальная частота воспроизведения.
 MAX_FPS = 60
@@ -50,27 +50,28 @@ GIF_QUALITY = 100
 GIF_MOTION_QUALITY = 100
 GIF_LOSSY_QUALITY = 100
 
-# Дополнительное усилие сжатия gifski.
-GIF_EXTRA_COMPRESSION = True
+# ОТКЛЮЧЕНО ДЛЯ СКОРОСТИ: Дополнительное сжатие gifski (--extra)
+GIF_EXTRA_COMPRESSION = False
 
-# Суперсэмплинг.
-SSAA_FACTOR = 2
+# ОТКЛЮЧЕНО ДЛЯ СКОРОСТИ: Суперсэмплинг (рендерим сразу в нужном размере)
+SSAA_FACTOR = 1
 SSAA_MAX_DIMENSION = 4096
 
 # --- MP4 / ffmpeg ---
 # CRF для x264: меньше = лучше качество, больше = меньше файл.
 MP4_CRF = 17
-# preset x264.
-MP4_PRESET = "slow"
+# УСКОРЕНО: preset x264 (fast работает в разы быстрее, чем slow)
+MP4_PRESET = "fast"
 # Профиль и уровень H.264.
 MP4_PROFILE = "high"
 MP4_LEVEL = "4.2"
 # Пиксельный формат (обязателен для совместимости).
 MP4_PIX_FMT = "yuv420p"
 
-# Отправлять в чат MP4 как анимацию + оригинальный GIF документом.
+# Отправлять в чат MP4 как анимацию.
 SEND_ANIMATION_MP4 = True
-SEND_ORIGINAL_AS_DOCUMENT = True
+# ОТКЛЮЧЕНО ДЛЯ СКОРОСТИ: Не отправляем оригинальный GIF документом
+SEND_ORIGINAL_AS_DOCUMENT = False
 
 # Одновременные конвертации.
 MAX_CONCURRENT_RENDERS = 1
@@ -784,7 +785,7 @@ async def lottie_to_file_ids(slug, chat_id):
                         slug,
                     )
 
-            # Fallback: GIF анимацией.
+            # Fallback: GIF анимацией, если MP4 не удался.
             if mpeg4_file_id is None:
                 log.info(
                     "Отправка GIF анимацией: %s, %.2f МБ",
@@ -811,7 +812,7 @@ async def lottie_to_file_ids(slug, chat_id):
                         slug,
                     )
 
-            # Оригинальный GIF документом.
+            # Оригинальный GIF документом (Сейчас ОТКЛЮЧЕНО в настройках).
             if SEND_ORIGINAL_AS_DOCUMENT:
                 try:
                     await bot.send_document(
@@ -924,8 +925,7 @@ async def handle_text(message: Message):
             data = await fetch_metadata(slug)
 
             await status.edit_text(
-                "🎬 Создаю анимацию максимального качества "
-                "(GIF + MP4)...\n"
+                "🎬 Создаю анимацию...\n"
                 "Пожалуйста, подожди."
             )
 
@@ -1043,10 +1043,8 @@ async def main():
         )
         log.info("Версия: %s", VERSION)
         log.info(
-            "Разрешение рендера: до %s px "
-            "(суперсэмплинг x%s)",
+            "Разрешение рендера: до %s px",
             MAX_RENDER_DIMENSION,
-            SSAA_FACTOR,
         )
         log.info(
             "MP4: crf=%s, preset=%s, profile=%s",
