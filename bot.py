@@ -18,7 +18,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSIn
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ==============================
 
-VERSION = "v1.9 (Безопасная запись файлов + Gifski)"
+VERSION = "v2.0 (Ultra Quality Gifski)"
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
@@ -111,7 +111,6 @@ async def lottie_to_gif_file_id(slug, chat_id):
         json_path = os.path.join(tmpdir, "anim.json")
         gif_path = os.path.join(tmpdir, "anim.gif")
 
-        # Безопасная запись без with open
         file_obj = open(json_path, "wb")
         file_obj.write(lottie_data)
         file_obj.close()
@@ -121,11 +120,11 @@ async def lottie_to_gif_file_id(slug, chat_id):
             orig_w, orig_h = anim.lottie_animation_get_size()
             total_frames = anim.lottie_animation_get_totalframe()
 
-            # Фикс замедления: увеличиваем FPS в 2.5 раза
+            # Фикс замедления: увеличиваем FPS в 2.5 раза (для Telegram)
             original_fps = int(anim.lottie_animation_get_framerate())
             fps = min(int(original_fps * 2.5), 60)
 
-            # Увеличиваем размер для качества
+            # Увеличиваем размер для качества (масштаб x2)
             scale = 2
             out_w, out_h = int(orig_w * scale), int(orig_h * scale)
 
@@ -138,13 +137,15 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
             anim.lottie_animation_destroy()
 
-            # Сборка gifski с максимальным качеством
+            # МАКСИМАЛЬНОЕ КАЧЕСТВО GIFSKI
             cmd = [
                 "gifski",
                 "-o", gif_path,
                 "--fps", str(fps),
-                "--quality", "95",
-                "--extra",
+                "--quality", "100",          # Общее качество
+                "--motion-quality", "100",   # Качество движения (убирает смазывание)
+                "--lossy-quality", "100",    # Качество сжатия (убирает шум)
+                "--extra",                   # Дополнительное улучшение
                 *frame_files
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -242,7 +243,7 @@ async def handle_text(message: Message):
     status = await message.answer("🔎 Получаю данные…")
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Рендерю кадры и собираю GIF (Gifski Extra Quality)…")
+        await status.edit_text("🎬 Рендерю кадры и собираю GIF (Ultra Quality 100)…")
 
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
@@ -267,7 +268,7 @@ async def handle_text(message: Message):
 
 
 @dp.inline_query()
-async def inline_search(query: InlineQuery):
+async def inline_query_handler(query: InlineQuery):
     items = get_nfts(query.query.strip(), limit=50)
     results = []
     for nft in items:
