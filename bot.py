@@ -109,17 +109,17 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         json_path = os.path.join(tmpdir, "anim.json")
-        gif_path = os.path.join(tmpdirlug, "anim.gif")
+        gif_path = os.path.join(tmpdir, "anim.gif")
 
-        with open):
-   (json with_path, "wb") as f:
- db            f.write(lottie_data)
+        # Сохраняем Lottie JSON в файл
+        with open(json_path, "wb") as f:
+            f.write(lottie_data)
 
         def _convert_with_gifski():
             anim = LottieAnimation.from_file(json_path)
             orig_w, orig_h = anim.lottie_animation_get_size()
             total_frames = anim.lottie_animation_get_totalframe()
-            
+
             # 1. Фикс замедления: увеличиваем FPS в 2.5 раза
             original_fps = int(anim.lottie_animation_get_framerate())
             fps = min(int(original_fps * 2.5), 60)
@@ -142,7 +142,7 @@ async def lottie_to_gif_file_id(slug, chat_id):
                 "gifski",
                 "-o", gif_path,
                 "--fps", str(fps),
-                "--quality", "95",   # Высокое качество (макс 100)
+                "--quality", "95",   # Высокое качество
                 "--extra",           # Доп. оптимизация качества
                 *frame_files
             ]
@@ -177,7 +177,8 @@ def save_nft(data, gif_file_id, user_id):
         ))
 
 
-def get_nft(s_connect() as conn:
+def get_nft(slug):
+    with db_connect() as conn:
         row = conn.execute("SELECT * FROM nfts WHERE slug = ?", (slug,)).fetchone()
     return dict(row) if row else None
 
