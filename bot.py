@@ -16,13 +16,12 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 
 # ========== 需要修改的配置 ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-ADMIN_ID = 1012040843
 # ===================================
 
 DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("nft-gif-test")
+log = logging.getLogger("nft-gif-bot")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -49,6 +48,7 @@ def init_db():
                 symbol TEXT,
                 page_url TEXT,
                 gif_file_id TEXT,
+                added_by INTEGER,
                 added_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
@@ -93,18 +93,18 @@ async def fetch_metadata(slug):
     }
 
 
-async def lottie_to_gif_file_id(slug):
-    """使用 pyrlottie 将 Lottie JSON 转为 GIF 并上传获取 file_id"""
+async def lottie_to_gif_file_id(slug, chat_id):
+    """Скачать Lottie → конвертировать в GIF через pyrlottie → отправить → вернуть file_id."""
     try:
         from pyrlottie import convSingleLottie, LottieFile, FileMap, run
     except ImportError:
-        raise RuntimeError("pyrlottie 未安装。请在 requirements.txt 中添加：pyrlottie")
+        raise RuntimeError("pyrlottie не установлен. Добавь в requirements.txt: pyrlottie")
 
     url = LOTTIE_URL.format(slug=slug)
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                raise ValueError(f"Lottie 下载失败: HTTP {resp.status}")
+                raise ValueError(f"Не удалось скачать Lottie: HTTP {resp.status}")
             lottie_data = await resp.read()
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -114,26 +114,28 @@ async def lottie_to_gif_file_id(slug):
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        # pyrlottie 转换（单文件）
-        run(
+        # pyrlottie.run — синхронная блокирующая функция со своим event loop.
+        # Запускаем её в отдельном потоке, чтобы не конфликтовать с aiogram.
+        await asyncio.to_thread(
+            run,
             convSingleLottie(
                 FileMap(LottieFile(json_path), {gif_path}),
-                1,  # 线程数
-            )
+                1,
+            ),
         )
 
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
-            raise RuntimeError("GIF 生成失败（可能 Lottie 格式不兼容 pyrlottie）")
+            raise RuntimeError("GIF не создан (возможно, Lottie несовместим с pyrlottie)")
 
         with open(gif_path, "rb") as gif_file:
             msg = await bot.send_animation(
-                chat_id=ADMIN_ID,
+                chat_id=chat_id,
                 animation=gif_file,
-                caption=f"测试 GIF: {slug}",
+                caption=f"🎁 {slug}",
             )
 
         if not msg.animation:
-            raise RuntimeError("Telegram 未返回 animation 对象")
+            raise RuntimeError("Telegram не вернул animation")
 
         return msg.animation.file_id
 
@@ -141,19 +143,26 @@ async def lottie_to_gif_file_id(slug):
 def save_nft(data, gif_file_id, user_id):
     with db_connect() as conn:
         conn.execute("""
-            INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id, added_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
                 title=excluded.title,
                 model=excluded.model,
                 backdrop=excluded.backdrop,
                 symbol=excluded.symbol,
                 page_url=excluded.page_url,
-                gif_file_id=excluded.gif_file_id
+                gif_file_id=excluded.gif_file_id,
+                added_by=excluded.added_by
         """, (
-            data["slug"], data["title"], data["model"],
-            data["backdrop"], data["symbol"], data["page_url"], gif_file_id
+            data["slug"], data["title"], data["model"], data["backdrop"],
+            data["symbol"], data["page_url"], gif_file_id, user_id
         ))
+
+
+def get_nft(slug):
+    with db_connect() as conn:
+        row = conn.execute("SELECT * FROM nfts WHERE slug = ?", (slug,)).fetchone()
+    return dict(row) if row else None
 
 
 def get_nfts(query="", limit=50):
@@ -185,9 +194,12 @@ def format_caption(nft):
 @dp.message(CommandStart())
 async def start(message: Message):
     await message.answer(
-        "🧪 <b>Тест GIF (pyrlottie)</b>\n\n"
-        "Отправь ссылку на NFT:\n"
-        "<code>https://t.me/nft/название-номер</code>",
+        "🎁 <b>NFT GIF Bot</b>\n\n"
+        "Отправь ссылку на NFT-подарок:\n"
+        "<code>https://t.me/nft/название-номер</code>\n\n"
+        "Бот скачает анимацию, конвертирует в GIF и сохранит.\n"
+        "Потом ищи в любом чате: <code>@этот_бот</code>\n\n"
+        "Отправлять NFT может любой пользователь.",
         parse_mode="HTML",
     )
 
@@ -199,32 +211,38 @@ async def handle_text(message: Message):
         await message.answer("❌ Отправь ссылку вида https://t.me/nft/xxx-1")
         return
 
-    if not message.from_user or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Только администратор.")
+    # Если уже есть в базе с GIF — сразу отдаём
+    existing = get_nft(slug)
+    if existing and existing.get("gif_file_id"):
+        await message.answer_animation(
+            animation=existing["gif_file_id"],
+            caption=format_caption(existing),
+            parse_mode="HTML",
+        )
         return
 
-    status = await message.answer("🔎 Получаю метаданные…")
+    status = await message.answer("🔎 Получаю данные NFT…")
 
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Конвертирую Lottie → GIF через pyrlottie…")
+        await status.edit_text("🎬 Конвертирую Lottie → GIF…")
 
-        gif_file_id = await lottie_to_gif_file_id(slug)
-        save_nft(data, gif_file_id, message.from_user.id)
+        gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
+        save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
 
         await status.edit_text(
-            f"✅ <b>成功！</b>\n\n"
+            f"✅ <b>Готово!</b>\n\n"
             f"🎁 {html.escape(slug)}\n"
             f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
             f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
             f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
-            f"Теперь проверь inline-режим: @твой_бот",
+            f"Теперь ищи в inline-режиме: @{(await bot.get_me()).username}",
             parse_mode="HTML",
         )
     except Exception as exc:
-        log.exception("失败: %s", slug)
+        log.exception("Не удалось обработать %s", slug)
         await status.edit_text(
-            f"❌ <b>失败</b>\n\n"
+            f"❌ <b>Не удалось</b>\n\n"
             f"<code>{html.escape(str(exc)[:500])}</code>",
             parse_mode="HTML",
         )
@@ -253,7 +271,7 @@ async def inline_search(query: InlineQuery):
 async def main():
     init_db()
     me = await bot.get_me()
-    log.info("Бот @%s запущен, admin=%s", me.username, ADMIN_ID)
+    log.info("Бот @%s запущен", me.username)
     await dp.start_polling(bot)
 
 
