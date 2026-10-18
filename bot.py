@@ -1,4 +1,3 @@
-
 import asyncio
 import html
 import logging
@@ -18,7 +17,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ===================================
 
-DB_PATH = Path(__file__).resolve().parent / "nfts_test.sqlite3"
+DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("nft-gif-bot")
@@ -114,15 +113,20 @@ async def lottie_to_gif_file_id(slug, chat_id):
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        # pyrlottie.run — синхронная блокирующая функция со своим event loop.
-        # Запускаем её в отдельном потоке, чтобы не конфликтовать с aiogram.
-        await asyncio.to_thread(
-            run,
-            convSingleLottie(
-                FileMap(LottieFile(json_path), {gif_path}),
-                1,
-            ),
-        )
+        def _run_pyrlottie():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return run(
+                    convSingleLottie(
+                        FileMap(LottieFile(json_path), {gif_path}),
+                        1,
+                    )
+                )
+            finally:
+                loop.close()
+
+        await asyncio.to_thread(_run_pyrlottie)
 
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
             raise RuntimeError("GIF не создан (возможно, Lottie несовместим с pyrlottie)")
@@ -193,12 +197,13 @@ def format_caption(nft):
 
 @dp.message(CommandStart())
 async def start(message: Message):
+    me = await bot.get_me()
     await message.answer(
         "🎁 <b>NFT GIF Bot</b>\n\n"
         "Отправь ссылку на NFT-подарок:\n"
         "<code>https://t.me/nft/название-номер</code>\n\n"
         "Бот скачает анимацию, конвертирует в GIF и сохранит.\n"
-        "Потом ищи в любом чате: <code>@этот_бот</code>\n\n"
+        f"Потом ищи в любом чате: <code>@{me.username}</code>\n\n"
         "Отправлять NFT может любой пользователь.",
         parse_mode="HTML",
     )
@@ -211,7 +216,6 @@ async def handle_text(message: Message):
         await message.answer("❌ Отправь ссылку вида https://t.me/nft/xxx-1")
         return
 
-    # Если уже есть в базе с GIF — сразу отдаём
     existing = get_nft(slug)
     if existing and existing.get("gif_file_id"):
         await message.answer_animation(
@@ -230,13 +234,14 @@ async def handle_text(message: Message):
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
 
+        me = await bot.get_me()
         await status.edit_text(
             f"✅ <b>Готово!</b>\n\n"
             f"🎁 {html.escape(slug)}\n"
             f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
             f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
             f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
-            f"Теперь ищи в inline-режиме: @{(await bot.get_me()).username}",
+            f"Теперь ищи в inline-режиме: @{me.username}",
             parse_mode="HTML",
         )
     except Exception as exc:
