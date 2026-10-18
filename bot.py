@@ -17,7 +17,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSIn
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ===================================
 
-VERSION = "v1.5 (rlottie quality: fps=30, 512x512)"
+VERSION = "v1.6 (правильные пропорции GIF + inline fix)"
 
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
@@ -95,7 +95,7 @@ async def fetch_metadata(slug):
 
 
 async def lottie_to_gif_file_id(slug, chat_id):
-    """Скачать Lottie → конвертировать в GIF (с улучшенным качеством) → отправить → вернуть file_id."""
+    """Скачать Lottie → конвертировать в GIF с сохранением пропорций → отправить → вернуть file_id."""
     try:
         from rlottie_python import LottieAnimation
     except ImportError:
@@ -117,8 +117,23 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
         def _convert():
             anim = LottieAnimation.from_file(json_path)
-            # Улучшенное качество: fps=30, размер 512x512
-            anim.save_animation(gif_path, fps=30, width=512, height=512)
+            
+            # Получаем РЕАЛЬНЫЕ размеры и FPS из Lottie, чтобы не растягивать паттерн
+            orig_width, orig_height = anim.lottie_animation_get_size()
+            orig_fps = anim.lottie_animation_get_framerate()
+            
+            # Увеличиваем в 2 раза для качества (сохраняя пропорции)
+            scale = 2.0
+            out_width = int(orig_width * scale)
+            out_height = int(orig_height * scale)
+            
+            # Ограничиваем FPS, чтобы файл не был слишком тяжелым
+            fps = min(int(orig_fps), 30)
+            if fps <= 0:
+                fps = 30
+
+            # Сохраняем с правильными пропорциями
+            anim.save_animation(gif_path, fps, width=out_width, height=out_height)
             anim.lottie_animation_destroy()
 
         await asyncio.to_thread(_convert)
@@ -225,7 +240,7 @@ async def handle_text(message: Message):
 
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Конвертирую Lottie → GIF (качество 512px)…")
+        await status.edit_text("🎬 Конвертирую Lottie → GIF (сохраняю пропорции)…")
 
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
