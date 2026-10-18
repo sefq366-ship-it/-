@@ -1,11 +1,7 @@
 FROM python:3.11-slim
 
-# Устанавливаем curl для скачивания gifski
-RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
-
-# Скачиваем бинарник для Linux x86_64 (GNU, не MUSL)
-RUN curl -L -o /usr/local/bin/gifski https://github.com/ImageOptim/gifski/releases/download/1.34.0/gifski-1.34.0-x86_64-unknown-linux-gnu && \
-    chmod +x /usr/local/bin/gifski
+# Устанавливаем gifski из официального репозитория Debian
+RUN apt-get update && apt-get install -y gifski && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
