@@ -18,7 +18,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSIn
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ==============================
 
-VERSION = "v1.7 (Gifski Quality)"
+VERSION = "v1.8 (Gifski High Quality + Speed Fix)"
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
@@ -109,17 +109,22 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         json_path = os.path.join(tmpdir, "anim.json")
-        gif_path = os.path.join(tmpdir, "anim.gif")
+        gif_path = os.path.join(tmpdirlug, "anim.gif")
 
-        with open(json_path, "wb") as f:
-            f.write(lottie_data)
+        with open):
+   (json with_path, "wb") as f:
+ db            f.write(lottie_data)
 
         def _convert_with_gifski():
             anim = LottieAnimation.from_file(json_path)
             orig_w, orig_h = anim.lottie_animation_get_size()
             total_frames = anim.lottie_animation_get_totalframe()
-            fps = min(int(anim.lottie_animation_get_framerate()), 30)
+            
+            # 1. Фикс замедления: увеличиваем FPS в 2.5 раза
+            original_fps = int(anim.lottie_animation_get_framerate())
+            fps = min(int(original_fps * 2.5), 60)
 
+            # 2. Увеличиваем размер для качества
             scale = 2
             out_w, out_h = int(orig_w * scale), int(orig_h * scale)
 
@@ -132,11 +137,13 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
             anim.lottie_animation_destroy()
 
+            # 3. Сборка gifski с максимальным качеством
             cmd = [
                 "gifski",
                 "-o", gif_path,
                 "--fps", str(fps),
-                "--quality", "90",
+                "--quality", "95",   # Высокое качество (макс 100)
+                "--extra",           # Доп. оптимизация качества
                 *frame_files
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
@@ -161,12 +168,8 @@ def save_nft(data, gif_file_id, user_id):
             INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id, added_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
-                title=excluded.title,
-                model=excluded.model,
-                backdrop=excluded.backdrop,
-                symbol=excluded.symbol,
-                page_url=excluded.page_url,
-                gif_file_id=excluded.gif_file_id,
+                title=excluded.title, model=excluded.model, backdrop=excluded.backdrop,
+                symbol=excluded.symbol, page_url=excluded.page_url, gif_file_id=excluded.gif_file_id,
                 added_by=excluded.added_by
         """, (
             data["slug"], data["title"], data["model"], data["backdrop"],
@@ -174,8 +177,7 @@ def save_nft(data, gif_file_id, user_id):
         ))
 
 
-def get_nft(slug):
-    with db_connect() as conn:
+def get_nft(s_connect() as conn:
         row = conn.execute("SELECT * FROM nfts WHERE slug = ?", (slug,)).fetchone()
     return dict(row) if row else None
 
@@ -238,7 +240,7 @@ async def handle_text(message: Message):
     status = await message.answer("🔎 Получаю данные…")
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Рендерю кадры и собираю GIF через Gifski (качество 90%)…")
+        await status.edit_text("🎬 Рендерю кадры и собираю GIF (Gifski Extra Quality)…")
 
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
