@@ -30,7 +30,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # НАСТРОЙКИ
 # ============================================================
 
-BOT_TOKEN = "8977910657:AAG9zbaj4CK-39uNSp0VAA_1yEiH5cb_wQE"
+BOT_TOKEN = "89-39uNSp0VAA_1yEiH5cb_wQE"
 
 VERSION = "v5.5 Fast MP4"
 
