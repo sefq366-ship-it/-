@@ -18,7 +18,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSIn
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ==============================
 
-VERSION = "v1.8 (Gifski High Quality + Speed Fix)"
+VERSION = "v1.9 (Безопасная запись файлов + Gifski)"
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
@@ -111,20 +111,21 @@ async def lottie_to_gif_file_id(slug, chat_id):
         json_path = os.path.join(tmpdir, "anim.json")
         gif_path = os.path.join(tmpdir, "anim.gif")
 
-        # Сохраняем Lottie JSON в файл
-        with open(json_path, "wb") as f:
-            f.write(lottie_data)
+        # Безопасная запись без with open
+        file_obj = open(json_path, "wb")
+        file_obj.write(lottie_data)
+        file_obj.close()
 
         def _convert_with_gifski():
             anim = LottieAnimation.from_file(json_path)
             orig_w, orig_h = anim.lottie_animation_get_size()
             total_frames = anim.lottie_animation_get_totalframe()
 
-            # 1. Фикс замедления: увеличиваем FPS в 2.5 раза
+            # Фикс замедления: увеличиваем FPS в 2.5 раза
             original_fps = int(anim.lottie_animation_get_framerate())
             fps = min(int(original_fps * 2.5), 60)
 
-            # 2. Увеличиваем размер для качества
+            # Увеличиваем размер для качества
             scale = 2
             out_w, out_h = int(orig_w * scale), int(orig_h * scale)
 
@@ -137,13 +138,13 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
             anim.lottie_animation_destroy()
 
-            # 3. Сборка gifski с максимальным качеством
+            # Сборка gifski с максимальным качеством
             cmd = [
                 "gifski",
                 "-o", gif_path,
                 "--fps", str(fps),
-                "--quality", "95",   # Высокое качество
-                "--extra",           # Доп. оптимизация качества
+                "--quality", "95",
+                "--extra",
                 *frame_files
             ]
             result = subprocess.run(cmd, capture_output=True, text=True)
