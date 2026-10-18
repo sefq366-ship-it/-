@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -13,12 +14,11 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSInputFile
 
-# ========== 需要修改的配置 ==========
+# ========== НАСТРОЙКИ ==========
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
-# ===================================
+# ==============================
 
-VERSION = "v1.6 (правильные пропорции GIF + inline fix)"
-
+VERSION = "v1.7 (Gifski Quality)"
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
 logging.basicConfig(level=logging.INFO)
@@ -69,88 +69,84 @@ async def fetch_metadata(slug):
     async with aiohttp.ClientSession(headers=headers) as session:
         async with session.get(f"https://t.me/nft/{slug}") as resp:
             if resp.status != 200:
-                raise ValueError(f"页面返回 HTTP {resp.status}")
+                raise ValueError(f"Ошибка страницы: {resp.status}")
             page = await resp.text()
 
     soup = BeautifulSoup(page, "html.parser")
     fields = {"model": "", "backdrop": "", "symbol": ""}
-
     for row in soup.find_all("tr"):
         cells = row.find_all(["th", "td"])
-        if len(cells) < 2:
-            continue
+        if len(cells) < 2: continue
         key = clean_html(str(cells[0])).lower().rstrip(":")
         val = clean_html(str(cells[1]))
-        if key in fields and val:
-            fields[key] = val
+        if key in fields and val: fields[key] = val
 
     return {
-        "slug": slug,
-        "title": slug,
-        "model": fields["model"],
-        "backdrop": fields["backdrop"],
-        "symbol": fields["symbol"],
+        "slug": slug, "title": slug, "model": fields["model"],
+        "backdrop": fields["backdrop"], "symbol": fields["symbol"],
         "page_url": f"https://t.me/nft/{slug}",
     }
 
 
 async def lottie_to_gif_file_id(slug, chat_id):
-    """Скачать Lottie → конвертировать в GIF с сохранением пропорций → отправить → вернуть file_id."""
-    try:
-        from rlottie_python import LottieAnimation
-    except ImportError:
-        raise RuntimeError("rlottie-python не установлен. Добавь в requirements.txt: rlottie-python[full]")
+_path    try:
+        from r =lottie_python import Lottie osAnimation
+        from PIL import Image
+.path    except ImportError:
+        raise Runtime.join(tmpError("Установите rlottie-python[full] и Pillow")
 
     url = LOTTIE_URL.format(slug=slug)
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             if resp.status != 200:
-                raise ValueError(f"Не удалось скачать Lottie: HTTP {resp.status}")
+                raise ValueError(f"Не удалось скачать Lottie: {resp.status}")
             lottie_data = await resp.read()
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        json_path = os.path.join(tmpdir, "anim.json")
+        jsondir, "anim.json")
         gif_path = os.path.join(tmpdir, "anim.gif")
 
         with open(json_path, "wb") as f:
             f.write(lottie_data)
 
-        def _convert():
+        def _convert_with_gifski():
             anim = LottieAnimation.from_file(json_path)
+            orig_w, orig_h = anim.lottie_animation_get_size()
+            total_frames = anim.lottie_animation_get_totalframe()
+            fps = min(int(anim.lottie_animation_get_framerate()), 30)
             
-            # Получаем РЕАЛЬНЫЕ размеры и FPS из Lottie, чтобы не растягивать паттерн
-            orig_width, orig_height = anim.lottie_animation_get_size()
-            orig_fps = anim.lottie_animation_get_framerate()
+            scale = 2
+            out_w, out_h = int(orig_w * scale), int(orig_h * scale)
             
-            # Увеличиваем в 2 раза для качества (сохраняя пропорции)
-            scale = 2.0
-            out_width = int(orig_width * scale)
-            out_height = int(orig_height * scale)
+            frame_files = []
+            for i in range(total_frames):
+                frame_path = os.path.join(tmpdir, f"frame_{i:04d}.png")
+                frame_img = anim.render_pillow_frame(frame_num=i, width=out_w, height=out_h)
+                frame_img.save(frame_path, "PNG")
+                frame_files.append(frame_path)
             
-            # Ограничиваем FPS, чтобы файл не был слишком тяжелым
-            fps = min(int(orig_fps), 30)
-            if fps <= 0:
-                fps = 30
-
-            # Сохраняем с правильными пропорциями
-            anim.save_animation(gif_path, fps, width=out_width, height=out_height)
             anim.lottie_animation_destroy()
 
-        await asyncio.to_thread(_convert)
+            cmd = [
+                "gifski",
+                "-o", gif_path,
+                "--fps", str(fps),
+                "--quality", "90",
+                *frame_files
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"Gifski error: {result.stderr[:300]}")
+
+        await asyncio.to_thread(_convert_with_gifski)
 
         if not os.path.exists(gif_path) or os.path.getsize(gif_path) == 0:
-            raise RuntimeError("GIF не создан (возможно, Lottie несовместим с rlottie)")
+            raise RuntimeError("GIF не создан")
 
         gif_input = FSInputFile(gif_path, filename=f"{slug}.gif")
-        msg = await bot.send_animation(
-            chat_id=chat_id,
-            animation=gif_input,
-            caption=f"🎁 {slug}",
-        )
-
+        msg = await bot.send_animation(chat_id=chat_id, animation=gif_input, caption=f"🎁 {slug}")
         if not msg.animation:
             raise RuntimeError("Telegram не вернул animation")
-
         return msg.animation.file_id
 
 
@@ -160,17 +156,10 @@ def save_nft(data, gif_file_id, user_id):
             INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id, added_by)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(slug) DO UPDATE SET
-                title=excluded.title,
-                model=excluded.model,
-                backdrop=excluded.backdrop,
-                symbol=excluded.symbol,
-                page_url=excluded.page_url,
-                gif_file_id=excluded.gif_file_id,
+                title=excluded.title, model=excluded.model, backdrop=excluded.backdrop,
+                symbol=excluded.symbol, page_url=excluded.page_url, gif_file_id=excluded.gif_file_id,
                 added_by=excluded.added_by
-        """, (
-            data["slug"], data["title"], data["model"], data["backdrop"],
-            data["symbol"], data["page_url"], gif_file_id, user_id
-        ))
+        """, (data["slug"], data["title"], data["model"], data["backdrop"], data["symbol"], data["page_url"], gif_file_id, user_id))
 
 
 def get_nft(slug):
@@ -184,14 +173,11 @@ def get_nfts(query="", limit=50):
         if query.strip():
             q = f"%{query.strip()}%"
             rows = conn.execute("""
-                SELECT * FROM nfts
-                WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ?
+                SELECT * FROM nfts WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ?
                 ORDER BY added_at DESC LIMIT ?
             """, (q, q, q, q, limit)).fetchall()
         else:
-            rows = conn.execute(
-                "SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?", (limit,)
-            ).fetchall()
+            rows = conn.execute("SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -209,13 +195,9 @@ def format_caption(nft):
 async def start(message: Message):
     me = await bot.get_me()
     await message.answer(
-        f"🎁 <b>NFT GIF Bot</b>\n"
-        f"<i>{VERSION}</i>\n\n"
-        "Отправь ссылку на NFT-подарок:\n"
-        "<code>https://t.me/nft/название-номер</code>\n\n"
-        "Бот скачает анимацию, конвертирует в GIF и сохранит.\n"
-        f"Потом ищи в любом чате: <code>@{me.username}</code>\n\n"
-        "Отправлять NFT может любой пользователь.",
+        f"🎁 <b>NFT GIF Bot</b>\n<i>{VERSION}</i>\n\n"
+        "Отправь ссылку на NFT:\n<code>https://t.me/nft/название-номер</code>\n\n"
+        f"Потом ищи в любом чате: <code>@{me.username}</code>",
         parse_mode="HTML",
     )
 
@@ -229,26 +211,20 @@ async def handle_text(message: Message):
 
     existing = get_nft(slug)
     if existing and existing.get("gif_file_id"):
-        await message.answer_animation(
-            animation=existing["gif_file_id"],
-            caption=format_caption(existing),
-            parse_mode="HTML",
-        )
+        await message.answer_animation(animation=existing["gif_file_id"], caption=format_caption(existing), parse_mode="HTML")
         return
 
-    status = await message.answer("🔎 Получаю данные NFT…")
-
+    status = await message.answer("🔎 Получаю данные…")
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Конвертирую Lottie → GIF (сохраняю пропорции)…")
+        await status.edit_text("🎬 Рендерю кадры и собираю GIF через Gifski (качество 90%)…")
 
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
 
         me = await bot.get_me()
         await status.edit_text(
-            f"✅ <b>Готово!</b>\n\n"
-            f"🎁 {html.escape(slug)}\n"
+            f"✅ <b>Готово!</b>\n\n🎁 {html.escape(slug)}\n"
             f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
             f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
             f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
@@ -256,22 +232,16 @@ async def handle_text(message: Message):
             parse_mode="HTML",
         )
     except Exception as exc:
-        log.exception("Не удалось обработать %s", slug)
-        await status.edit_text(
-            f"❌ <b>Не удалось</b>\n\n"
-            f"<code>{html.escape(str(exc)[:500])}</code>",
-            parse_mode="HTML",
-        )
+        log.exception("Ошибка %s", slug)
+        await status.edit_text(f"❌ <b>Не удалось</b>\n\n<code>{html.escape(str(exc)[:500])}</code>", parse_mode="HTML")
 
 
 @dp.inline_query()
 async def inline_search(query: InlineQuery):
     items = get_nfts(query.query.strip(), limit=50)
     results = []
-
     for nft in items:
-        if not nft.get("gif_file_id"):
-            continue
+        if not nft.get("gif_file_id"): continue
         results.append(
             InlineQueryResultCachedGif(
                 id=nft["slug"],
@@ -280,7 +250,6 @@ async def inline_search(query: InlineQuery):
                 parse_mode="HTML",
             )
         )
-
     await query.answer(results=results, cache_time=1, is_personal=True)
 
 
