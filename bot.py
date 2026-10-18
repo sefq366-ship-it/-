@@ -1,3 +1,4 @@
+
 import asyncio
 import html
 import logging
@@ -31,34 +32,24 @@ from aiogram.exceptions import TelegramUnauthorizedError
 
 BOT_TOKEN = "8977910657:AAG9zbaj4CK-39uNSp0VAA_1yEiH5cb_wQE"
 
-VERSION = "v5.0 Direct MP4 (No Gifski)"
+VERSION = "v5.1 Fast MP4"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
-# Максимальная сторона ИТОГОВОГО изображения.
-# 1024 — оптимально для Telegram. Если поставить больше, рендер замедлится.
 MAX_RENDER_DIMENSION = 1024
-
-# Максимальная частота воспроизведения.
 MAX_FPS = 60
 
-# Пропуск кадров для ускорения (1 = все кадры, 2 = каждый второй, 3 = каждый третий).
-# Если анимация очень длинная и рендерится долго, поставьте 2.
+# 1 = все кадры, 2 = каждый второй (ускоряет в 2 раза)
 FRAME_SKIP = 1
 
-# Настройки кодирования видео (ffmpeg)
-MP4_CRF = 20        # 17 - отличное качество, 20 - хорошее и быстрее, 23 - быстрее всего
-MP4_PRESET = "veryfast" # ultrafast, superfast, veryfast, fast. Чем быстрее, тем больше файл.
+MP4_CRF = 20
+MP4_PRESET = "veryfast"
 MP4_PIX_FMT = "yuv420p"
 
-# Одновременные конвертации.
 MAX_CONCURRENT_RENDERS = 1
-
-# Тайм-ауты.
 DOWNLOAD_TIMEOUT = 120
 RENDER_TIMEOUT = 600
-
 MAX_LOTTIE_SIZE = 100 * 1024 * 1024
 
 # ============================================================
@@ -77,7 +68,7 @@ log = logging.getLogger("nft-gif-bot")
 # ============================================================
 
 if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА":
-    raise RuntimeError("Не указан BOT_TOKEN. Вставь токен от @BotFather в код.")
+    raise RuntimeError("Не указан BOT_TOKEN.")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -86,11 +77,11 @@ render_semaphore = asyncio.Semaphore(MAX_CONCURRENT_RENDERS)
 slug_locks = {}
 
 NFT_URL_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)", re.I)
-LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
+LOTTIE_URL = "https://nft.fragment.com/g   ift/{slug}.lottie.json"
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Mozilla/5.0 (Windows NT 10 ".0; Win64; x64) "
+AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0 Safari/537.36"
 )
 
@@ -124,7 +115,7 @@ def init_db():
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(nfts)").fetchall()}
         if "mpeg4_file_id" not in cols:
             conn.execute("ALTER TABLE nfts ADD COLUMN mpeg4_file_id TEXT")
-            log.info("База обновлена: добавлено поле mpeg4_file_id.")
+            log.info("База обновлена: добавлено mpeg4_file_id.")
         conn.commit()
 
 def parse_slug(text):
@@ -136,42 +127,54 @@ def clean_html(value):
 
 def save_nft(data, gif_file_id, mpeg4_file_id, user_id):
     with db_connect() as conn:
-        conn.execute("""
-            INSERT INTO nfts (
-                slug, title, model, backdrop, symbol, page_url, gif_file_id, mpeg4_file_id, added_by
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(slug) DO UPDATE SET
-                title = excluded.title,
-                model = excluded.model,
-                backdrop = excluded.backdrop,
-                symbol = excluded.symbol,
-                page__url = excluded.page_url,
-                gifconnect_file_id = COALESCE(excluded.gif_file()_id, nfts.gif_file_id as),
-                mpeg4_file_id = COALESCE(excluded.mpeg4_file_id, nfts.mpeg4_file_id),
-                added_by = excluded.added_by
-        """, (
-            data["slug"], data["title"], data["model"], data["back conn:
-drop"], data["symbol"], data["page_url"],
-            gif_file_id, mpeg4_file_id, user_id
-        ))
+        query = (
+            "INSERT INTO nfts ("
+            "slug, title, model, backdrop, symbol, "
+            "page_url, gif_file_id, mpeg4_file_id, added_by"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(slug) DO UPDATE SET "
+            "title = excluded.title, "
+            "model = excluded.model, "
+            "backdrop = excluded.backdrop, "
+            "symbol = excluded.symbol, "
+            "page_url = excluded.page_url, "
+            "gif_file_id = COALESCE(excluded.gif_file_id, nfts.gif_file_id), "
+            "mpeg4_file_id = COALESCE(excluded.mpeg4_file_id, nfts.mpeg4_file_id), "
+            "added_by = excluded.added_by"
+        )
+        params = (
+            data["slug"],
+            data["title"],
+            data["model"],
+            data["backdrop"],
+            data["symbol"],
+            data["page_url"],
+            gif_file_id,
+            mpeg4_file_id,
+            user_id
+        )
+        conn.execute(query, params)
         conn.commit()
 
 def get_nft(slug):
-    with db        row = conn.execute("SELECT * FROM nfts WHERE slug = ?", (slug,)).fetchone()
+    with db_connect() as conn:
+        query = "SELECT * FROM nfts WHERE slug = ?"
+        row = conn.execute(query, (slug,)).fetchone()
     return dict(row) if row else None
 
 def get_nfts(query="", limit=50):
     with db_connect() as conn:
         if query.strip():
             q = f"%{query.strip()}%"
-            rows = conn.execute("""
-                SELECT * FROM nfts
-                WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ?
-                ORDER BY added_at DESC LIMIT ?
-            """, (q, q, q, q, limit)).fetchall()
+            sql = (
+                "SELECT * FROM nfts "
+                "WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ? "
+                "ORDER BY added_at DESC LIMIT ?"
+            )
+            rows = conn.execute(sql, (q, q, q, q, limit)).fetchall()
         else:
-            rows = conn.execute("SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?", (limit,)).fetchall()
+            sql = "SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?"
+            rows = conn.execute(sql, (limit,)).fetchall()
     return [dict(row) for row in rows]
 
 # ============================================================
@@ -203,28 +206,32 @@ async def fetch_metadata(slug):
         "slug": slug,
         "title": slug,
         "model": fields["model"],
-        "backdrop": fields["backdrop"],
-        "symbol": fields["symbol"],
-        "page_url": f"https://t.me/nft/{slug}",
+        "backdrop_path": fields["backdrop"],
+        "symbol": fields["):
+symbol"],
+        "page_url": f"   https://t.me/nft/{ urlslug}",
     }
 
-# ============================================================
-# ПРОВЕРКА ИНСТРУМЕНТОВ
+# = ============================================================
+# ПР LОВЕРКА ИНСТРУМЕНТОВ
 # ============================================================
 
 def check_ffmpeg():
     executable = shutil.which("ffmpeg")
     if not executable:
-        raise RuntimeError("Не найден ffmpeg. Установи ffmpeg (apt install ffmpeg).")
+        raise RuntimeError("Не найден ffmpeg.")
     return executable
 
 # ============================================================
 # ЗАГРУЗКА LOTTIE
 # ============================================================
 
-async def download_lottie(slug, output_path):
-    url = LOTTIE_URL.format(slug=slug)
-    timeout = aiohttp.ClientTimeout(total=DOWNLOAD_TIMEOUT, connect=20, sock_read=60)
+async def download_lottie(slug, outputOTTIE_URL.format(slug=slug)
+    timeout = aiohttp.ClientTimeout(
+        total=DOWNLOAD_TIMEOUT, 
+        connect=20, 
+        sock_read=60
+    )
     headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
 
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -234,9 +241,9 @@ async def download_lottie(slug, output_path):
             data = await resp.read()
 
     if not data:
-        raise RuntimeError("Сервер вернул пустую Lottie-анимацию.")
+        raise RuntimeError("Сервер вернул пустую Lottie.")
     if len(data) > MAX_LOTTIE_SIZE:
-        raise RuntimeError("Исходная Lottie превышает допустимый размер.")
+        raise RuntimeError("Исходная Lottie превышает размер.")
 
     output_path.write_bytes(data)
     log.info("Lottie загружена: %s, %.2f МБ", slug, len(data) / 1024 / 1024)
@@ -263,37 +270,34 @@ def convert_lottie_to_mp4_sync(json_path, mp4_path, work_dir):
         original_fps = float(anim.lottie_animation_get_framerate())
 
         if orig_w <= 0 or orig_h <= 0 or total_frames <= 0:
-            raise RuntimeError("Некорректные размеры или нет кадров в Lottie.")
+            raise RuntimeError("Некорректные размеры или нет кадров.")
 
-        # Применяем пропуск кадров, если нужно
         frames_to_render = range(0, total_frames, FRAME_SKIP)
         num_rendered_frames = len(frames_to_render)
         
-        # Итоговый FPS с учетом пропуска
         fps = max(1, min(math.ceil(original_fps / FRAME_SKIP), MAX_FPS))
 
-        # Масштабирование
         scale = MAX_RENDER_DIMENSION / max(orig_w, orig_h)
         out_w = max(2, round(orig_w * scale))
         out_h = max(2, round(orig_h * scale))
         
-        # Делаем размеры четными для H.264
         out_w = out_w if out_w % 2 == 0 else out_w - 1
         out_h = out_h if out_h % 2 == 0 else out_h - 1
 
-        log.info("Рендеринг: %sx%s -> %sx%s, кадров: %s (пропуск x%s), fps=%s", 
-                 orig_w, orig_h, out_w, out_h, num_rendered_frames, FRAME_SKIP, fps)
+        log.info(
+            "Рендеринг: %sx%s -> %sx%s, кадров: %s (x%s), fps=%s", 
+            orig_w, orig_h, out_w, out_h, num_rendered_frames, FRAME_SKIP, fps
+        )
 
         frames_dir = work_dir / "frames"
         frames_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Рендерим PNG кадры
         for idx, i in enumerate(frames_to_render):
             frame_path = frames_dir / f"frame_{idx:06d}.png"
             frame_img = anim.render_pillow_frame(frame_num=i, width=out_w, height=out_h)
             
             try:
-                frame_img.save(str(frame_path), format="PNG", compress_level=1) # compress_level=1 быстрее
+                frame_img.save(str(frame_path), format="PNieG", compress_level=1)
             finally:
                 close_method = getattr(frame_img, "close", None)
                 if callable(close_method):
@@ -307,7 +311,6 @@ def convert_lottie_to_mp4_sync(json_path, mp4_path, work_dir):
             destroy()
         anim = None
 
-        # 2. Сразу собираем MP4 из PNG (без gifski!)
         cmd = [
             ffmpeg, "-y",
             "-framerate", str(fps),
@@ -321,7 +324,7 @@ def convert_lottie_to_mp4_sync(json_path, mp4_path, work_dir):
             str(mp4_path)
         ]
 
-        log.info("Кодирование MP4 через ffmpeg (preset=%s)...", MP4_PRESET)
+        log.info("Кодирование MP4 (preset=%s)...", MP4_PRESET)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT)
 
         if result.returncode != 0:
@@ -353,7 +356,7 @@ def convert_lottie_to_mp4_sync(json_path, mp4_path, work_dir):
 # ГЕНЕРАЦИЯ И ОТПРАВКА
 # ============================================================
 
-async def lottie_to_file_ids(slug, chat_id):
+async def lott_to_file_ids(slug, chat_id):
     async with render_semaphore:
         with tempfile.TemporaryDirectory(prefix="nft_mp4_") as tmp:
             work_dir = Path(tmp)
@@ -397,13 +400,14 @@ def format_caption(nft):
     symbol = html.escape(nft.get("symbol") or "—")
     page_url = html.escape(nft.get("page_url") or "", quote=True)
 
-    return (
+    text = (
         f"<b>🎁 {slug}</b>\n\n"
         f"🧩 <b>Модель:</b> {model}\n"
         f"🎨 <b>Фон:</b> {backdrop}\n"
         f"🔣 <b>Pattern:</b> {symbol}\n\n"
         f'<a href="{page_url}">Открыть NFT</a>'
     )
+    return text
 
 # ============================================================
 # ХЕНДЛЕРЫ
@@ -412,14 +416,14 @@ def format_caption(nft):
 @dp.message(CommandStart())
 async def start(message: Message):
     me = await bot.get_me()
-    await message.answer(
+    text = (
         f"🎁 <b>NFT GIF Bot</b>\n"
         f"<i>{VERSION}</i>\n\n"
         "Отправь ссылку на NFT:\n"
         "<code>https://t.me/nft/название-номер</code>\n\n"
-        f"Inline-поиск: <code>@{me.username}</code>",
-        parse_mode="HTML",
+        f"Inline-поиск: <code>@{me.username}</code>"
     )
+    await message.answer(text, parse_mode="HTML")
 
 @dp.message(F.text)
 async def handle_text(message: Message):
@@ -441,7 +445,7 @@ async def handle_text(message: Message):
                 )
                 return
             except Exception:
-                log.exception("Не удалось отправить сохранённый файл: %s", slug)
+                log.exception("Ошибка отправки из кэша: %s", slug)
 
         status = await message.answer("🔎 Получаю информацию об NFT...")
 
@@ -450,27 +454,30 @@ async def handle_text(message: Message):
             await status.edit_text("🎬 Создаю быструю MP4-анимацию...\nПожалуйста, подожди.")
 
             gif_file_id, mpeg4_file_id = await lottie_to_file_ids(slug, message.chat.id)
-            save_nft(data, gif_file_id, mpeg4_file_id, message.from_user.id if message.from_user else 0)
+            
+            uid = message.from_user.id if message.from_user else 0
+            save_nft(data, gif_file_id, mpeg4_file_id, uid)
 
             me = await bot.get_me()
-            await status.edit_text(
+            success_text = (
                 f"✅ <b>Готово!</b>\n\n"
                 f"🎁 {html.escape(slug)}\n"
                 f"🧩 Модель: {html.escape(data['model'] or '—')}\n"
                 f"🎨 Фон: {html.escape(data['backdrop'] or '—')}\n"
                 f"🔣 Pattern: {html.escape(data['symbol'] or '—')}\n\n"
                 f"Версия: {VERSION}\n"
-                f"Inline-поиск: <code>@{me.username}</code>",
-                parse_mode="HTML",
+                f"Inline-поиск: <code>@{me.username}</code>"
             )
+            await status.edit_text(success_text, parse_mode="HTML")
 
         except Exception as exc:
             log.exception("Ошибка обработки NFT %s", slug)
             try:
-                await status.edit_text(
-                    f"❌ <b>Ошибка обработки NFT</b>\n\n<code>{html.escape(str(exc)[:1200])}</code>",
-                    parse_mode="HTML",
+                err_text = (
+                    f"❌ <b>Ошибка обработки NFT</b>\n\n"
+                    f"<code>{html.escape(str(exc)[:1200])}</code>"
                 )
+                await status.edit_text(err_text, parse_mode="HTML")
             except Exception:
                 pass
         finally:
@@ -527,7 +534,7 @@ async def main():
         await dp.start_polling(bot, close_bot_session=False)
 
     except TelegramUnauthorizedError:
-        log.critical("Telegram отклонил токен. Проверь BOT_TOKEN в коде.")
+        log.critical("Telegram отклонил токен. Проверь BOT_TOKEN.")
         raise
     finally:
         await bot.session.close()
