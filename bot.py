@@ -17,7 +17,7 @@ from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, FSIn
 BOT_TOKEN = "8977910657:AAFn1ZohJDaUFUDsE4ka2YBH85-ENak0HoE"
 # ===================================
 
-VERSION = "v1.4 (rlottie-python + FSInputFile)"
+VERSION = "v1.5 (rlottie quality: fps=30, 512x512)"
 
 DB_PATH = Path(__file__).resolve().parent / "nfts.sqlite3"
 
@@ -95,7 +95,7 @@ async def fetch_metadata(slug):
 
 
 async def lottie_to_gif_file_id(slug, chat_id):
-    """Скачать Lottie → конвертировать в GIF через rlottie-python → отправить → вернуть file_id."""
+    """Скачать Lottie → конвертировать в GIF (с улучшенным качеством) → отправить → вернуть file_id."""
     try:
         from rlottie_python import LottieAnimation
     except ImportError:
@@ -117,7 +117,8 @@ async def lottie_to_gif_file_id(slug, chat_id):
 
         def _convert():
             anim = LottieAnimation.from_file(json_path)
-            anim.save_animation(gif_path)
+            # Улучшенное качество: fps=30, размер 512x512
+            anim.save_animation(gif_path, fps=30, width=512, height=512)
             anim.lottie_animation_destroy()
 
         await asyncio.to_thread(_convert)
@@ -224,7 +225,7 @@ async def handle_text(message: Message):
 
     try:
         data = await fetch_metadata(slug)
-        await status.edit_text("🎬 Конвертирую Lottie → GIF…")
+        await status.edit_text("🎬 Конвертирую Lottie → GIF (качество 512px)…")
 
         gif_file_id = await lottie_to_gif_file_id(slug, message.chat.id)
         save_nft(data, gif_file_id, message.from_user.id if message.from_user else 0)
