@@ -1,4 +1,4 @@
 aiogram>=3.13,<4
 aiohttp>=3.9
 beautifulsoup4>=4.12
-pyrlottie
+rlottie-python[full]
