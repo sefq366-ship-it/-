@@ -3,4 +3,4 @@ aiohttp>=3.10,<4.0
 beautifulsoup4>=4.12,<5.0
 Pillow>=10.4,<13.0
 lottie
-cairosvg
+rlottie-python[full]
