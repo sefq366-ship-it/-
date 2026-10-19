@@ -21,14 +21,14 @@ from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
 
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v6.0"
+VERSION = "v6.2 Scaled Wide MP4"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
-MAX_DIM = 1024
+MAX_DIM = 1280 
 MAX_FPS = 60
-FRAME_SKIP = 2
+FRAME_SKIP = 1
 MP4_CRF = 20
 MP4_PRESET = "veryfast"
 MP4_PIX = "yuv420p"
@@ -37,11 +37,20 @@ DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
 MAX_LOTTIE = 100 * 1024 * 1024
 
-# --- НАСТРОЙКИ ФОРМАТА ---
-# Если True, видео будет широким (16:9) с обрезкой верх/низ
-CROP_TO_WIDE = True 
-# Пропорция ширины к высоте (16/9 = 1.777)
-WIDE_RATIO = 16 / 9
+# =========================================================
+# НАСТРОЙКИ ВНЕШНЕГО ВИДА
+# =========================================================
+# Пропорции видео (чем больше, тем шире): 16/9, 2/1, 21/9
+WIDE_RATIO = 2.0 
+
+# Размер модельки: 1.0 (большая), 0.7 (средняя), 0.5 (маленькая)
+MODEL_SCALE = 0.7 
+
+# Цвет фона: (R, G, B, A)
+# (30, 30, 40, 255) - темно-синий
+# (0, 0, 0, 0) - прозрачный (может не работать в некоторых клиентах)
+BG_COLOR = (30, 30, 40, 255) 
+# =========================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -190,40 +199,23 @@ def conv_sync(json_path, mp4_path, work_dir):
         nf = len(frames)
         fps = max(1, min(math.ceil(ofps / FRAME_SKIP), MAX_FPS))
         
-        # --- ЛОГИКА ШИРОКОГО ФОРМАТА ---
-        if CROP_TO_WIDE:
-            # Берем исходную высоту и вычисляем ширину для 16:9
-            # Но так как исходник квадратный, мы делаем ширину максимальной (1024), 
-            # а высоту вычисляем по пропорции (1024 / 1.777 = 576)
-            ow = MAX_DIM
-            oh = int(ow / WIDE_RATIO)
-            
-            # Убеждаемся, что размеры четные
-            ow = ow if ow % 2 == 0 else ow - 1
-            oh = oh if oh % 2 == 0 else oh - 1
-            
-            # Координаты для обрезки (crop) по центру
-            # Мы берем исходный квадрат (w x h), центрируем его и обрезаем сверху/снизу
-            scale = ow / max(w, h)
-            scaled_w = int(w * scale)
-            scaled_h = int(h * scale)
-            
-            # Смещение по Y (чтобы обрезать равномерно сверху и снизу)
-            crop_y = (scaled_h - oh) // 2
-            if crop_y < 0:
-                crop_y = 0
-            
-            log.info(f"Crop Wide: {ow}x{oh} (Y offset: {crop_y})")
-        else:
-            # Стандартный квадратный рендер
-            sc = MAX_DIM / max(w, h)
-            ow = max(2, round(w * sc))
-            oh = max(2, round(h * sc))
-            ow = ow if ow % 2 == 0 else ow - 1
-            oh = oh if oh % 2 == 0 else oh - 1
-            scaled_w = ow
-            scaled_h = oh
-            crop_y = 0
+        # 1. Задаем итоговый размер широкого холста
+        out_w = MAX_DIM
+        out_h = int(out_w / WIDE_RATIO)
+        out_w = out_w if out_w % 2 == 0 else out_w - 1
+        out_h = out_h if out_h % 2 == 0 else out_h - 1
+        
+        # 2. Вычисляем размер самой модельки
+        # Берем высоту холста и умножаем на MODEL_SCALE
+        target_model_size = int(out_h * MODEL_SCALE)
+        # Делаем размер модели четным
+        target_model_size = target_model_size if target_model_size % 2 == 0 else target_model_size - 1
+
+        # Координаты для вставки в центр
+        offset_x = (out_w - target_model_size) // 2
+        offset_y = (out_h - target_model_size) // 2
+
+        log.info(f"Render: Canvas {out_w}x{out_h}, Model {target_model_size}x{target_model_size}")
 
         fdir = work_dir / "frames"
         fdir.mkdir(parents=True, exist_ok=True)
@@ -231,27 +223,37 @@ def conv_sync(json_path, mp4_path, work_dir):
         for idx, i in enumerate(frames):
             fp = fdir / f"f_{idx:06d}.png"
             
-            # Рендерим кадр в увеличенном размере
-            img = anim.render_pillow_frame(frame_num=i, width=scaled_w, height=scaled_h)
+            # Рендерим только саму модель нужного размера
+            img = anim.render_pillow_frame(frame_num=i, width=target_model_size, height=target_model_size)
             
-            if CROP_TO_WIDE:
-                # Обрезаем кадр сверху и снизу
-                # (left, upper, right, lower)
-                box = (0, crop_y, scaled_w, crop_y + oh)
-                img = img.crop(box)
+            # Создаем широкий фон
+            if len(BG_COLOR) == 4:
+                bg = Image.new("RGBA", (out_w, out_h), BG_COLOR)
+            else:
+                bg = Image.new("RGB", (out_w, out_h), BG_COLOR)
+            
+            # Вставляем модель в центр
+            if img.mode == "RGBA":
+                bg.paste(img, (offset_x, offset_y), img)
+            else:
+                bg.paste(img, (offset_x, offset_y))
             
             try:
-                img.save(str(fp), format="PNG", compress_level=1)
+                bg.save(str(fp), format="PNG", compress_level=1)
             finally:
                 cl = getattr(img, "close", None)
-                if callable(cl):
-                    cl()
+                if callable(cl): cl()
+                cl_bg = getattr(bg, "close", None)
+                if callable(cl_bg): cl_bg()
                     
         dst = getattr(anim, "lottie_animation_destroy", None)
         if callable(dst):
             dst()
         anim = None
         
+        # Кодируем видео. 
+        # Так как в PNG есть альфа-канал (RGBA), при сборке в MP4 (yuv420p) 
+        # прозрачность заменится на черный цвет.
         cmd = [
             ff, "-y", "-framerate", str(fps),
             "-i", str(fdir / "f_%06d.png"),
