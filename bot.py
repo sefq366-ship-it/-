@@ -7,10 +7,11 @@ import sqlite3
 import subprocess
 import tempfile
 import re
+import json
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
-from PIL import Image, ImageFilter
+from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
@@ -25,24 +26,24 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 
-# Размеры широкой карточки (ширина x высота)
+# Размер широкой карточки
 CARD_W = 1000
 CARD_H = 700
 
-# Размер самой модели внутри карточки (0.6 = 60% от высоты)
-MODEL_SCALE = 0.6 
+# Размер самой модели (0.65 = 65% от высоты карточки)
+MODEL_SCALE = 0.65 
 
 # Скорость и качество
 FPS = 30
-FRAME_SKIP = 2 # Пропуск кадров (2 или 3 для ускорения)
+FRAME_SKIP = 2 
 MP4_CRF = 22
-MP4_PRESET = "ultrafast" # Максимальная скорость кодирования
+MP4_PRESET = "ultrafast"
 
 # ==============================================================================
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v15.0 Stretched BG"
+VERSION = "v16.0 Layer Splitter"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -51,10 +52,7 @@ DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
 MAX_LOTTIE = 100 * 1024 * 1024
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("nft")
 
 if not BOT_TOKEN or BOT_TOKEN == "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА":
@@ -67,11 +65,7 @@ locks = {}
 
 NFT_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)", re.I)
 LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
-
-UA_1 = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-UA_2 = "AppleWebKit/537.36 (KHTML, like Gecko) "
-UA_3 = "Chrome/131.0 Safari/537.36"
-USER_AGENT = UA_1 + UA_2 + UA_3
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
 def db_conn():
     c = sqlite3.connect(DB_PATH, timeout=30)
@@ -98,21 +92,15 @@ def get_slug(txt):
     return m.group(1) if m else None
 
 def clean_html(v):
-    s = BeautifulSoup(v or "", "html.parser")
-    return " ".join(s.get_text(" ", strip=True).split())
+    return " ".join(BeautifulSoup(v or "", "html.parser").get_text(" ", strip=True).split())
 
 def save_nft(d, g_id, m_id, u_id):
     with db_conn() as c:
-        q = "INSERT INTO nfts (slug, title, model, backdrop, symbol, "
-        q += "page_url, gif_file_id, mpeg4_file_id, added_by) "
+        q = "INSERT INTO nfts (slug, title, model, backdrop, symbol, page_url, gif_file_id, mpeg4_file_id, added_by) "
         q += "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-        q += "ON CONFLICT(slug) DO UPDATE SET "
-        q += "title=excluded.title, model=excluded.model, "
-        q += "backdrop=excluded.backdrop, symbol=excluded.symbol, "
-        q += "page_url=excluded.page_url, added_by=excluded.added_by"
-        p = (d["slug"], d["title"], d["model"], d["backdrop"], d["symbol"],
-             d["page_url"], g_id, m_id, u_id)
-        c.execute(q, p)
+        q += "ON CONFLICT(slug) DO UPDATE SET title=excluded.title, model=excluded.model, backdrop=excluded.backdrop, "
+        q += "symbol=excluded.symbol, page_url=excluded.page_url, added_by=excluded.added_by"
+        c.execute(q, (d["slug"], d["title"], d["model"], d["backdrop"], d["symbol"], d["page_url"], g_id, m_id, u_id))
         c.commit()
 
 def get_nft(slug):
@@ -124,167 +112,137 @@ def get_nfts(q="", lim=50):
     with db_conn() as c:
         if q.strip():
             s = f"%{q.strip()}%"
-            sql = "SELECT * FROM nfts WHERE slug LIKE ? OR model LIKE ? "
-            sql += "OR backdrop LIKE ? OR symbol LIKE ? "
-            sql += "ORDER BY added_at DESC LIMIT ?"
+            sql = "SELECT * FROM nfts WHERE slug LIKE ? OR model LIKE ? OR backdrop LIKE ? OR symbol LIKE ? ORDER BY added_at DESC LIMIT ?"
             rows = c.execute(sql, (s, s, s, s, lim)).fetchall()
         else:
-            sql = "SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?"
-            rows = c.execute(sql, (lim,)).fetchall()
+            rows = c.execute("SELECT * FROM nfts ORDER BY added_at DESC LIMIT ?", (lim,)).fetchall()
     return [dict(r) for r in rows]
 
 async def fetch_meta(slug):
-    t = aiohttp.ClientTimeout(total=30)
-    h = {"User-Agent": USER_AGENT}
-    async with aiohttp.ClientSession(timeout=t, headers=h) as s:
-        url = f"https://t.me/nft/{slug}"
-        async with s.get(url) as r:
-            if r.status != 200:
-                raise ValueError(f"HTTP {r.status}")
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30), headers={"User-Agent": UA}) as s:
+        async with s.get(f"https://t.me/nft/{slug}") as r:
+            if r.status != 200: raise ValueError(f"HTTP {r.status}")
             p = await r.text()
 
     soup = BeautifulSoup(p, "html.parser")
     f = {"model": "", "backdrop": "", "symbol": ""}
-
     for tr in soup.find_all("tr"):
         cells = tr.find_all(["th", "td"])
-        if len(cells) < 2:
-            continue
+        if len(cells) < 2: continue
         k = clean_html(str(cells[0])).lower().rstrip(":")
-        v = clean_html(str(cells[1]))
-        if k in f and v:
-            f[k] = v
-
-    return {
-        "slug": slug,
-        "title": slug,
-        "model": f["model"],
-        "backdrop": f["backdrop"],
-        "symbol": f["symbol"],
-        "page_url": f"https://t.me/nft/{slug}",
-    }
+        if k in f: f[k] = clean_html(str(cells[1]))
+    return {"slug": slug, "title": slug, "model": f["model"], "backdrop": f["backdrop"], "symbol": f["symbol"], "page_url": f"https://t.me/nft/{slug}"}
 
 def check_ff():
     exe = shutil.which("ffmpeg")
-    if not exe:
-        raise RuntimeError("Нет ffmpeg")
+    if not exe: raise RuntimeError("Нет ffmpeg")
     return exe
 
 async def dl_lottie(slug, path):
     url = LOTTIE_URL.format(slug=slug)
-    t = aiohttp.ClientTimeout(total=DL_TIMEOUT)
-    h = {"User-Agent": USER_AGENT}
-    
-    async with aiohttp.ClientSession(timeout=t, headers=h) as s:
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DL_TIMEOUT), headers={"User-Agent": UA}) as s:
         async with s.get(url) as r:
-            if r.status == 404:
-                raise RuntimeError("NFT не найден (404).")
-            if r.status != 200:
-                raise ValueError(f"HTTP {r.status}")
+            if r.status != 200: raise ValueError(f"HTTP {r.status}")
             d = await r.read()
-            
-    if not d:
-        raise RuntimeError("Пустой файл Lottie")
     path.write_bytes(d)
+
+def split_lottie(json_path, bg_path, model_path):
+    """Разделяет JSON на фон и модель (по имени слоя)"""
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # Ищем слой, в названии которого есть "model", "gift", "cap" и т.д.
+    # В NFT Fragment модель обычно называется "Model" или является единственным слоем с анимацией.
+    layers = data.get("layers", [])
+    bg_layers = []
+    model_layers = []
+
+    for layer in layers:
+        name = layer.get("nm", "").lower()
+        # Если в имени есть 'model', 'gift', 'cap' и т.д. - это модель. 
+        # Или если это единственный слой с ассетами.
+        if "model" in name or "gift" in name or "cap" in name:
+            model_layers.append(layer)
+        else:
+            bg_layers.append(layer)
+
+    # Если не нашли по имени, берем первый слой как модель, остальные как фон
+    if not model_layers and layers:
+        model_layers = [layers[0]]
+        bg_layers = layers[1:]
+
+    # Сохраняем фон
+    bg_data = data.copy()
+    bg_data["Errorlayers"] = bg_layers
+   (f with open(bg"_path, "w", encoding="utf-ff8") as f:
+        json.dump(bg_data, f)
+
+    # Сохраняем модель
+    model_data = data.copy()
+    model_data["layers"] = model_layers
+    with open(model_path, "w", encoding="utf-8") as f:
+        json.dump(model_data, f)
 
 def conv_sync(json_path, mp4_path, work_dir, nft_data):
     from rlottie_python import LottieAnimation
     ff = check_ff()
-    anim = None
-    try:
-        anim = LottieAnimation.from_file(str(json_path))
-        w, h = anim.lottie_animation_get_size()
-        w, h = int(w), int(h)
-        tf = int(anim.lottie_animation_get_totalframe())
-        ofps = float(anim.lottie_animation_get_framerate())
-        
-        frames = range(0, tf, FRAME_SKIP)
-        fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
+    
+    bg_json = work_dir / "bg.json"
+    model_json = work_dir / "model.json"
+    
+    # 1. Разделяем файл
+    split_lottie(json_path, bg_json, model_json)
+    
+    bg_anim = LottieAnimation.from_file(str(bg_json))
+    model_anim = LottieAnimation.from_file(str(model_json))
+    
+    tf = int(bg_anim.lottie_animation_get_totalframe())
+    ofps = float(bg_anim.lottie_animation_get_framerate())
+    frames = range(0, tf, FRAME_SKIP)
+    fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
 
-        # Размер модельки
-        model_h = int(CARD_H * MODEL_SCALE)
-        model_w = model_h
-        
-        offset_x = (CARD_W - model_w) // 2
-        offset_y = (CARD_H - model_h) // 2
+    model_h = int(CARD_H * MODEL_SCALE)
+    model_w = model_h
+    offset_x = (CARD_W - model_w) // 2
+    offset_y = (CARD_H - model_h) // 2
 
-        log.info(f"Render: {CARD_W}x{CARD_H}, Model: {model_w}x{model_h}")
+    fdir = work_dir / "frames"
+    fdir.mkdir(parents=True, exist_ok=True)
 
-        fdir = work_dir / "frames"
-        fdir.mkdir(parents=True, exist_ok=True)
-        
-        # 1. Создаем растянутый фон из оригинального паттерна
-        # Берем первый кадр, чтобы вытащить узоры
-        temp_img = anim.render_pillow_frame(frame_num=0, width=w, height=h)
-        # Растягиваем его на весь наш широкий холст
-        bg_stretched = temp_img.convert("RGB").resize((CARD_W, CARD_H), Image.Resampling.BICUBIC)
-        # Немного размываем, чтобы убрать саму модель с фона, оставив только узоры
-        bg_stretched = bg_stretched.filter(ImageFilter.GaussianBlur(radius=15))
-        temp_img.close()
+    log.info(f"Render: {CARD_W}x{CARD_H}, Frames: {len(list(frames))}")
 
-        for idx, i in enumerate(frames):
-            fp = fdir / f"f_{idx:06d}.png"
-            
-            # 2. Рендерим модель (с прозрачным фоном)
-            img = anim.render_pillow_frame(
-                frame_num=i, 
-                width=model_w, 
-                height=model_h
-            )
-            
-            # 3. Накладываем модель на растянутый фон
-            bg = bg_stretched.copy()
-            
-            if img.mode == "RGBA":
-                bg.paste(img, (offset_x, offset_y), img)
-            else:
-                bg.paste(img, (offset_x, offset_y))
-            
-            try:
-                bg.save(str(fp), format="PNG", compress_level=0) # compress_level=0 для скорости
-            finally:
-                cl = getattr(img, "close", None)
-                if callable(cl): cl()
-                cl_b = getattr(bg, "close", None)
-                if callable(cl_b): cl_b()
-                    
-        dst = getattr(anim, "lottie_animation_destroy", None)
-        if callable(dst):
-            dst()
-        anim = None
+    for idx, i in enumerate(frames):
+        fp = fdir / f"f_{idx:06d}.png"
         
-        # 4. Ускоренная сборка видео (threads 0 = использовать все ядра)
-        cmd = [
-            ff, "-y", 
-            "-framerate", str(fps),
-            "-i", str(fdir / "f_%06d.png"),
-            "-an", 
-            "-c:v", "libx264",
-            "-preset", MP4_PRESET,
-            "-crf", str(MP4_CRF),
-            "-pix_fmt", MP4_PIX,
-            "-threads", "0", # Многопоточность
-            "-movflags", "+faststart",
-            str(mp4_path)
-        ]
+        # 2. Рендерим ФОН во весь размер (он растянется сам, так как меняем width/height)
+        bg_img = bg_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
         
-        res = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            timeout=RENDER_TIMEOUT
-        )
+        # 3. Рендерим МОДЕЛЬ в нужном размере (с альфа-каналом)
+        model_img = model_anim.render_pillow_frame(frame_num=i, width=model_w, height=model_h)
         
-        if res.returncode != 0:
-            raise RuntimeError(f"ffmpeg err: {res.stderr[-500:]}")
-    finally:
-        if anim is not None:
-            dst = getattr(anim, "lottie_animation_destroy", None)
-            if callable(dst):
-                try:
-                    dst()
-                except:
-                    pass
+        # 4. Накладываем модель на фон
+        if model_img.mode == "RGBA":
+            bg_img.paste(model_img, (offset_x, offset_y), model_img)
+        else:
+            bg_img.paste(model_img, (offset_x, offset_y))
+        
+        bg_img.save(str(fp), format="PNG", compress_level=0)
+        
+        bg_img.close()
+        model_img.close()
+
+    bg_anim.lottie_animation_destroy()
+    model_anim.lottie_animation_destroy()
+
+    # 5. Сборка MP4
+    cmd = [
+        ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
+        "-an", "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", str(MP4_CRF),
+        "-pix_fmt", MP4_PIX, "-threads", "0", "-movflags", "+faststart", str(mp4_path)
+    ]
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT)
+    if res.returncode != 0:
+        raise Runtimempeg err: {res.stderr[-500:]}")
 
 async def gen_ids(slug, chat_id):
     async with sem:
@@ -295,25 +253,15 @@ async def gen_ids(slug, chat_id):
             
             await dl_lottie(slug, jp)
             d = await fetch_meta(slug)
-            
             await asyncio.to_thread(conv_sync, jp, mp, wd, d)
             
             mid = None
-            gid = None
             try:
-                msg = await bot.send_animation(
-                    chat_id=chat_id,
-                    animation=FSInputFile(
-                        str(mp), 
-                        filename=f"{slug}.mp4"
-                    ),
-                    caption=f"NFT: {slug}",
-                )
-                if msg.animation:
-                    mid = msg.animation.file_id
+                msg = await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(mp), filename=f"{slug}.mp4"), caption=f"NFT: {slug}")
+                if msg.animation: mid = msg.animation.file_id
             except Exception:
                 log.exception("send err")
-            return gid, mid, d
+            return None, mid, d
 
 def fmt_cap(nft):
     s = html.escape(nft.get("slug") or "")
@@ -321,20 +269,12 @@ def fmt_cap(nft):
     b = html.escape(nft.get("backdrop") or "-")
     sy = html.escape(nft.get("symbol") or "-")
     u = html.escape(nft.get("page_url") or "")
-    
-    t = f"<b>{s}</b>\n"
-    t += f"Model: {m}\n"
-    t += f"Bg: {b}\n"
-    t += f"Pattern: {sy}\n"
-    t += f"<a href='{u}'>Link</a>"
-    return t
+    return f"<b>{s}</b>\nModel: {m}\nBg: {b}\nPattern: {sy}\n<a href='{u}'>Link</a>"
 
 @dp.message(CommandStart())
 async def start(msg: Message):
     me = await bot.get_me()
-    t = f"Bot {VERSION}\n"
-    t += f"Search: @{me.username}"
-    await msg.answer(t, parse_mode="HTML")
+    await msg.answer(f"Bot {VERSION}\nSearch: @{me.username}", parse_mode="HTML")
 
 @dp.message(F.text)
 async def handle_txt(msg: Message):
@@ -344,75 +284,38 @@ async def handle_txt(msg: Message):
         return
 
     lk = locks.setdefault(slug, asyncio.Lock())
-
     async with lk:
         ext = get_nft(slug)
         if ext and ext.get("mpeg4_file_id"):
             try:
-                await msg.answer_animation(
-                    animation=ext["mpeg4_file_id"],
-                    caption=fmt_cap(ext),
-                    parse_mode="HTML",
-                )
+                await msg.answer_animation(animation=ext["mpeg4_file_id"], caption=fmt_cap(ext), parse_mode="HTML")
                 return
-            except:
-                pass
+            except: pass
 
         st = await msg.answer("Wait...")
         try:
             gid, mid, d = await gen_ids(slug, msg.chat.id)
-            
-            uid = msg.from_user.id if msg.from_user else 0
-            save_nft(d, gid, mid, uid)
-            
-            me = await bot.get_me()
-            tt = f"Done!\n@{me.username}"
-            await st.edit_text(tt)
+            save_nft(d, gid, mid, msg.from_user.id if msg.from_user else 0)
+            await st.edit_text(f"Done!\n@{bot.username}")
         except Exception as e:
-            try:
-                await st.edit_text(f"Err: {e}")
-            except:
-                pass
+            await st.edit_text(f"Err: {e}")
         finally:
-            if locks.get(slug) is lk:
-                locks.pop(slug, None)
+            if locks.get(slug) is lk: locks.pop(slug, None)
 
 @dp.inline_query()
 async def inline(q: InlineQuery):
-    s = (q.query or "").strip()
-    items = get_nfts(s, lim=50)
+    items = get_nfts((q.query or "").strip(), lim=50)
     res = []
-
     for n in items:
         cap = fmt_cap(n)
-        mid = n.get("mpeg4_file_id")
-        gid = n.get("gif_file_id")
-        
+        mid, gid = n.get("mpeg4_file_id"), n.get("gif_file_id")
         if mid:
-            r = InlineQueryResultCachedMpeg4Gif(
-                id=n["slug"],
-                mpeg4_file_id=mid,
-                caption=cap,
-                parse_mode="HTML",
-            )
-            res.append(r)
+            res.append(InlineQueryResultCachedMpeg4Gif(id=n["slug"], mpeg4_file_id=mid, caption=cap, parse_mode="HTML"))
         elif gid:
-            r = InlineQueryResultCachedGif(
-                id=n["slug"],
-                gif_file_id=gid,
-                caption=cap,
-                parse_mode="HTML",
-            )
-            res.append(r)
-
+            res.append(InlineQueryResultCachedGif(id=n["slug"], gif_file_id=gid, caption=cap, parse_mode="HTML"))
     try:
-        await q.answer(
-            results=res, 
-            cache_time=1, 
-            is_personal=True
-        )
-    except:
-        pass
+        await q.answer(results=res, cache_time=1, is_personal=True)
+    except: pass
 
 async def main():
     init_db()
