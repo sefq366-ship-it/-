@@ -26,7 +26,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 
-# Размер широкой карточки (1000x700 - идеально для карточек)
+# Размер широкой карточки (1000x700)
 CARD_W = 1000
 CARD_H = 700
 
@@ -43,7 +43,7 @@ MP4_PRESET = "ultrafast"
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v16.1 Layer Splitter Fixed"
+VERSION = "v16.2 Wide Background"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -209,6 +209,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
+        # Принудительно рендерим фон во всю ширину и высоту (он растянется)
         bg_img = bg_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
         model_img = model_anim.render_pillow_frame(frame_num=i, width=model_w, height=model_h)
         
