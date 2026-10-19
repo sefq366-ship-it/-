@@ -7,6 +7,8 @@ import sqlite3
 import subprocess
 import tempfile
 import re
+import json
+import io
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
@@ -16,30 +18,26 @@ from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, InlineQueryResultCachedMpeg4Gif, FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
 
+# Импорты для работы со слоями
+from lottie.parsers.tgs import parse_tgs
+from lottie.exporters.cairo import export_png
+from lottie.objects import Composition, Layer
+
 # ==============================================================================
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
-BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
+BOT_TOKEN = "BOT_TOKEN"
+VERSION = "v25.0 True Layer Split"
 
-# Формат видео 16:9
 CARD_W = 1280
 CARD_H = 720
+MODEL_SCALE = 1.0 
 
-# Размер центрального квадрата с моделью (0.9 = 90% от высоты)
-# Чем меньше, тем меньше будет оригинального квадрата на фоне
-MODEL_SCALE = 0.9 
-
-# Скорость и качество
 FPS = 30
 FRAME_SKIP = 2 
 MP4_CRF = 22
 MP4_PRESET = "ultrafast"
 
-# ==============================================================================
-# ⚠️ КОД
-# ==============================================================================
-
-VERSION = "v19.0 Center Overlay"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -133,25 +131,71 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
+def isolate_layers(json_path, bg_path, model_path):
+    """Разделяет оригинальный Lottie на фон (с паттерном) и модель"""
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    layers = data.get("layers", [])
+    bg_layers = []
+    model_layers = []
+
+    for layer in layers:
+        name = layer.get("nm", "").lower()
+        # Модель обычно содержит слово model, gift, или это единственный анимированный слой
+        if "model" in name or "gift" in name:
+            model_layers.append(layer)
+        else:
+            bg_layers.append(layer)
+
+    if not model_layers:
+        # Если не нашли по имени, берем последний слой как модель (обычно модель сверху)
+        model_layers = [layers[-1]]
+        bg_layers = layers[:-1]
+
+    # Сохраняем фон (растянутый)
+    bg_data = data.copy()
+    bg_data["layers"] = bg_layers
+    with open(bg_path, "w", encoding="utf-8") as f:
+        json.dump(bg_data, f)
+
+    # Сохраняем модель
+    model_data = data.copy()
+    model_data["layers"] = model_layers
+    with open(model_path, "w", encoding="utf-8") as f:
+        json.dump(model_data, f)
+
 def conv_sync(json_path, mp4_path, work_dir, nft_data):
-    from rlottie_python import LottieAnimation
     ff = check_ff()
     
-    anim = LottieAnimation.from_file(str(json_path))
-    tf = int(anim.lottie_animation_get_totalframe())
-    ofps = float(anim.lottie_animation_get_framerate())
+    bg_json = work_dir / "bg.json"
+    model_json = work_dir / "model.json"
+    
+    isolate_layers(json_path, bg_json, model_json)
+    
+    # Загружаем композиции
+    with open(bg_json, "r", encoding="utf-8") as f:
+        bg_anim = parse_tgs(f, Composition)
+    
+    with open(model_json, "r", encoding="utf-8") as f:
+        model_anim = parse_tgs(f, Composition)
+
+    # Задаем размеры холста
+    bg_anim.width = CARD_W
+    bg_anim.height = CARD_H
+    
+    model_h = int(CARD_H * MODEL_SCALE)
+    model_w = model_h
+    model_anim.width = model_w
+    model_anim.height = model_h
+
+    tf = int(bg_anim.out_point)
+    ofps = float(bg_anim.frame_rate)
     frames = range(0, tf, FRAME_SKIP)
     fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
 
-    # Размер оригинального квадрата
-    orig_size = CARD_H # 720
-    orig_size = orig_size if orig_size % 2 == 0 else orig_size - 1
-
-    # Координаты для наложения по центру
-    offset_y = (CARD_H - orig_size) // 2
-    offset_x = (CARD_W - orig_size) // 2
-
-    log.info(f"Render: {CARD_W}x{CARD_H}, Original Overlay: {orig_size}x{orig_size}")
+    offset_y = (CARD_H - model_h) // 2
+    offset_x = (CARD_W - model_w) // 2
 
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
@@ -159,24 +203,19 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
-        # 1. Рендерим оригинальный квадрат (720x720)
-        img_orig = anim.render_pillow_frame(frame_num=i, width=orig_size, height=orig_size)
+        # 1. Рендерим растянутый фон с паттерном
+        bg_img = export_png(bg_anim, frame=i, width=CARD_W, height=CARD_H)
         
-        # 2. Создаем широкий фон (1280x720) и растягиваем на него оригинал
-        bg_wide = img_orig.resize((CARD_W, CARD_H), Image.Resampling.BILINEAR)
+        # 2. Рендерим модель
+        model_img = export_png(model_anim, frame=i, width=model_w, height=model_h)
         
-        # 3. Накладываем оригинальный квадрат по центру
-        if img_orig.mode == "RGBA":
-            bg_wide.paste(img_orig, (offset_x, offset_y), img_orig)
-        else:
-            bg_wide.paste(img_orig, (offset_x, offset_y))
+        # 3. Склеиваем
+        bg_img.paste(model_img, (offset_x, offset_y), model_img)
         
-        bg_wide.save(str(fp), format="PNG", compress_level=0)
+        bg_img.convert("RGB").save(str(fp), format="PNG", compress_level=0)
         
-        img_orig.close()
-        bg_wide.close()
-
-    anim.lottie_animation_destroy()
+        bg_img.close()
+        model_img.close()
 
     cmd = [
         ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
