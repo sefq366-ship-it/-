@@ -22,16 +22,16 @@ from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
 
 # ==============================================================================
-# ⚙️ НАСТРОЙКИ (ВАШ ФОРМАТ 1280x720)
+# ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 
-# Идеальный широкий формат для Telegram (без черных полос)
+# Формат видео (1280x720 — от края до края, без полос)
 CARD_W = 1280
 CARD_H = 720
 
-# Размер самой модели внутри (0.85 = 85% от высоты, чтобы она была крупной)
-MODEL_SCALE = 0.85 
+# Масштаб модели (1.0 = оригинальный размер, 0.8 = чуть меньше)
+MODEL_SCALE = 1.0 
 
 # Скорость и качество
 FPS = 30
@@ -43,7 +43,7 @@ MP4_PRESET = "ultrafast"
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v16.3 True 1280x720"
+VERSION = "v17.0 Real Background"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -137,60 +137,56 @@ def check_ff():
     if not exe: raise RuntimeError("Нет ffmpeg")
     return exe
 
-async def dl_lottie(slug, path):
-    url = LOTTIE_URL.format(slug=slug)
+async def dl_file(url, path):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=DL_TIMEOUT), headers={"User-Agent": UA}) as s:
         async with s.get(url) as r:
             if r.status != 200: raise ValueError(f"HTTP {r.status}")
             d = await r.read()
     path.write_bytes(d)
 
-def split_lottie(json_path, bg_path):
-    """Отделяем только фон и паттерн (убираем модель)"""
+def isolate_model(json_path, model_path):
+    """Умное вырезание модели без знания названий слоев"""
     try:
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         layers = data.get("layers", [])
-        bg_layers = []
-
+        # Ищем слой, который имеет анимацию (модель всегда анимирована, фон - нет)
+        # Или берем самый большой слой
+        model_layer = None
         for layer in layers:
-            name = layer.get("nm", "").lower()
-            # Оставляем все слои, КРОМЕ модели (шапки/подарка)
-            if "model" not in name and "gift" not in name and "cap" not in name:
-                bg_layers.append(layer)
-
-        # Если фон пустой (модель была единственным слоем), берем оригинал
-        if not bg_layers:
-            shutil.copy(json_path, bg_path)
-            return
-
-        bg_data = data.copy()
-        bg_data["layers"] = bg_layers
+            if layer.get("ks", {}).get("p", {}).get("k") is not None:
+                model_layer = layer
+                break
         
-        with open(bg_path, "w", encoding="utf-8") as f:
-            json.dump(bg_data, f)
+        if model_layer:
+            model_data = data.copy()
+            model_data["layers"] = [model_layer]
+            with open(model_path, "w", encoding="utf-8") as f:
+                json.dump(model_data, f)
+        else:
+            shutil.copy(json_path, model_path)
     except Exception as e:
-        log.warning(f"Ошибка разделения: {e}")
-        shutil.copy(json_path, bg_path)
+        log.warning(f"Ошибка: {e}")
+        shutil.copy(json_path, model_path)
 
 def conv_sync(json_path, mp4_path, work_dir, nft_data):
     from rlottie_python import LottieAnimation
     ff = check_ff()
     
-    bg_json = work_dir / "bg.json"
-    split_lottie(json_path, bg_json)
+    model_json = work_dir / "model.json"
+    isolate_model(json_path, model_json)
     
-    # Анимации
-    bg_anim = LottieAnimation.from_file(str(bg_json))     # Только фон
-    main_anim = LottieAnimation.from_file(str(json_path)) # Оригинал (модель + фон)
+    model_anim = LottieAnimation.from_file(str(model_json))
+    # Также загружаем оригинал для паттернов (фона)
+    full_anim = LottieAnimation.from_file(str(json_path))
     
-    tf = int(main_anim.lottie_animation_get_totalframe())
-    ofps = float(main_anim.lottie_animation_get_framerate())
+    tf = int(full_anim.lottie_animation_get_totalframe())
+    ofps = float(full_anim.lottie_animation_get_framerate())
     frames = range(0, tf, FRAME_SKIP)
     fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
 
-    # Размер модели в центре
+    # Размер модели в центре (оригинальный размер из конфига)
     model_h = int(CARD_H * MODEL_SCALE)
     model_w = model_h
     offset_x = (CARD_W - model_w) // 2
@@ -199,33 +195,27 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Render: {CARD_W}x{CARD_H}, Frames: {len(list(frames))}")
-
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
-        # 1. Растягиваем ФОН на 1280x720
-        bg_img = bg_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
+        # 1. Растягиваем ФОН и ПАТТЕРНЫ (берем оригинал и растягиваем до 1280x720)
+        bg_img = full_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
         
-        # 2. Рендерим ОРИГИНАЛ (с моделью) нужного размера
-        # ВАЖНО: мы рендерим оригинал в размере model_w/model_h. 
-        # Так как фон прозрачный, он не перекроет растянутый фон.
-        # Но если фон не прозрачный, он закроет наш растянутый (поэтому мы вырезали фон выше).
-        model_img = main_anim.render_pillow_frame(frame_num=i, width=model_w, height=model_h)
+        # 2. Рендерим МОДЕЛЬ (с прозрачным фоном)
+        model_img = model_anim.render_pillow_frame(frame_num=i, width=model_w, height=model_h)
         
-        # 3. Накладываем модель
+        # 3. Накладываем модель по центру (чтобы перекрыть растянутую модель на фоне)
         if model_img.mode == "RGBA":
             bg_img.paste(model_img, (offset_x, offset_y), model_img)
         else:
             bg_img.paste(model_img, (offset_x, offset_y))
         
         bg_img.save(str(fp), format="PNG", compress_level=0)
-        
         bg_img.close()
         model_img.close()
 
-    bg_anim.lottie_animation_destroy()
-    main_anim.lottie_animation_destroy()
+    model_anim.lottie_animation_destroy()
+    full_anim.lottie_animation_destroy()
 
     cmd = [
         ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
@@ -243,7 +233,7 @@ async def gen_ids(slug, chat_id):
             jp = wd / "a.json"
             mp = wd / "a.mp4"
             
-            await dl_lottie(slug, jp)
+            await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
             await asyncio.to_thread(conv_sync, jp, mp, wd, d)
             
