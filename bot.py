@@ -21,14 +21,14 @@ from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
 
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v5.2"
+VERSION = "v6.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
 MAX_DIM = 1024
 MAX_FPS = 60
-FRAME_SKIP = 1
+FRAME_SKIP = 2
 MP4_CRF = 20
 MP4_PRESET = "veryfast"
 MP4_PIX = "yuv420p"
@@ -36,6 +36,12 @@ MAX_CONC = 1
 DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
 MAX_LOTTIE = 100 * 1024 * 1024
+
+# --- НАСТРОЙКИ ФОРМАТА ---
+# Если True, видео будет широким (16:9) с обрезкой верх/низ
+CROP_TO_WIDE = True 
+# Пропорция ширины к высоте (16/9 = 1.777)
+WIDE_RATIO = 16 / 9
 
 logging.basicConfig(
     level=logging.INFO,
@@ -184,18 +190,56 @@ def conv_sync(json_path, mp4_path, work_dir):
         nf = len(frames)
         fps = max(1, min(math.ceil(ofps / FRAME_SKIP), MAX_FPS))
         
-        sc = MAX_DIM / max(w, h)
-        ow = max(2, round(w * sc))
-        oh = max(2, round(h * sc))
-        ow = ow if ow % 2 == 0 else ow - 1
-        oh = oh if oh % 2 == 0 else oh - 1
-        
+        # --- ЛОГИКА ШИРОКОГО ФОРМАТА ---
+        if CROP_TO_WIDE:
+            # Берем исходную высоту и вычисляем ширину для 16:9
+            # Но так как исходник квадратный, мы делаем ширину максимальной (1024), 
+            # а высоту вычисляем по пропорции (1024 / 1.777 = 576)
+            ow = MAX_DIM
+            oh = int(ow / WIDE_RATIO)
+            
+            # Убеждаемся, что размеры четные
+            ow = ow if ow % 2 == 0 else ow - 1
+            oh = oh if oh % 2 == 0 else oh - 1
+            
+            # Координаты для обрезки (crop) по центру
+            # Мы берем исходный квадрат (w x h), центрируем его и обрезаем сверху/снизу
+            scale = ow / max(w, h)
+            scaled_w = int(w * scale)
+            scaled_h = int(h * scale)
+            
+            # Смещение по Y (чтобы обрезать равномерно сверху и снизу)
+            crop_y = (scaled_h - oh) // 2
+            if crop_y < 0:
+                crop_y = 0
+            
+            log.info(f"Crop Wide: {ow}x{oh} (Y offset: {crop_y})")
+        else:
+            # Стандартный квадратный рендер
+            sc = MAX_DIM / max(w, h)
+            ow = max(2, round(w * sc))
+            oh = max(2, round(h * sc))
+            ow = ow if ow % 2 == 0 else ow - 1
+            oh = oh if oh % 2 == 0 else oh - 1
+            scaled_w = ow
+            scaled_h = oh
+            crop_y = 0
+
         fdir = work_dir / "frames"
         fdir.mkdir(parents=True, exist_ok=True)
         
         for idx, i in enumerate(frames):
             fp = fdir / f"f_{idx:06d}.png"
-            img = anim.render_pillow_frame(frame_num=i, width=ow, height=oh)
+            
+            # Рендерим кадр в увеличенном размере
+            img = anim.render_pillow_frame(frame_num=i, width=scaled_w, height=scaled_h)
+            
+            if CROP_TO_WIDE:
+                # Обрезаем кадр сверху и снизу
+                # (left, upper, right, lower)
+                box = (0, crop_y, scaled_w, crop_y + oh)
+                img = img.crop(box)
+            
             try:
                 img.save(str(fp), format="PNG", compress_level=1)
             finally:
