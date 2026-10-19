@@ -6,9 +6,10 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     ffmpeg \
-    libcairo2-dev \
-    libgirepository1.0-dev \
     && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 WORKDIR /app
 COPY requirements.txt .
