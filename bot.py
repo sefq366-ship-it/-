@@ -25,9 +25,12 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 
-# Размеры карточки (ширина x высота)
+# Размеры широкой карточки (ширина x высота)
 CARD_W = 1000
 CARD_H = 700
+
+# Размер самой модели внутри карточки (0.8 = 80% от высоты)
+MODEL_SCALE = 0.8 
 
 # Скорость и качество
 FPS = 30
@@ -39,7 +42,7 @@ MP4_PRESET = "ultrafast"
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v14.1 No Text"
+VERSION = "v14.2 Fix rlottie"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -198,8 +201,8 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
         frames = range(0, tf, FRAME_SKIP)
         fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
 
-        # Размер модельки (чуть меньше карточки, чтобы было место вокруг)
-        model_h = int(CARD_H * 0.8)
+        # Размер модельки
+        model_h = int(CARD_H * MODEL_SCALE)
         model_w = model_h
         
         offset_x = (CARD_W - model_w) // 2
@@ -210,7 +213,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
         fdir = work_dir / "frames"
         fdir.mkdir(parents=True, exist_ok=True)
         
-        # 1. Берем цвет фона из первого кадра (чтобы он не был черным)
+        # 1. Берем цвет фона из первого кадра
         temp_img = anim.render_pillow_frame(frame_num=0, width=64, height=64)
         bg_rgb = temp_img.convert("RGB")
         c1 = bg_rgb.getpixel((5, 5))
@@ -227,7 +230,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
                 height=model_h
             )
             
-            # 3. Создаем широкий холст и заливаем цветом фона
+            # 3. Создаем широкий холст
             bg = Image.new("RGBA", (CARD_W, CARD_H), bg_color)
             
             # 4. Вставляем модель
