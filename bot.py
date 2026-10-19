@@ -20,15 +20,29 @@ from aiogram.types import InlineQueryResultCachedMpeg4Gif
 from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
 
+# =========================================================
+# НАСТРОЙКИ
+# =========================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v6.2 Scaled Wide MP4"
+VERSION = "v6.4 Full Width"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 
+# Разрешение
 MAX_DIM = 1280 
+
+# Пропорции: 16/9 = 1.77 (стандартное широкое видео)
+WIDE_RATIO = 16 / 9 
+
+# Размер модели (1.0 = во всю высоту)
+MODEL_SCALE = 1.0 
+
+# Фон (прозрачный, MP4 сделает его черным)
+BG_COLOR = (0, 0, 0, 0) 
+
+FRAME_SKIP = 1 
 MAX_FPS = 60
-FRAME_SKIP = 1
 MP4_CRF = 20
 MP4_PRESET = "veryfast"
 MP4_PIX = "yuv420p"
@@ -36,20 +50,6 @@ MAX_CONC = 1
 DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
 MAX_LOTTIE = 100 * 1024 * 1024
-
-# =========================================================
-# НАСТРОЙКИ ВНЕШНЕГО ВИДА
-# =========================================================
-# Пропорции видео (чем больше, тем шире): 16/9, 2/1, 21/9
-WIDE_RATIO = 2.0 
-
-# Размер модельки: 1.0 (большая), 0.7 (средняя), 0.5 (маленькая)
-MODEL_SCALE = 0.7 
-
-# Цвет фона: (R, G, B, A)
-# (30, 30, 40, 255) - темно-синий
-# (0, 0, 0, 0) - прозрачный (может не работать в некоторых клиентах)
-BG_COLOR = (30, 30, 40, 255) 
 # =========================================================
 
 logging.basicConfig(
@@ -82,12 +82,12 @@ def db_conn():
 def init_db():
     BASE_DIR.mkdir(parents=True, exist_ok=True)
     with db_conn() as c:
-        c.execute("PRAGMA journal_mode=WAL")
+        c.execute_id("PRAGMA journal_mode=WAL")
         q = "CREATE TABLE IF NOT EXISTS nfts ("
-        q += "slug TEXT PRIMARY KEY, title TEXT, model TEXT, "
-        q += "backdrop TEXT, symbol TEXT, page_url TEXT, "
+        q, += "slug TEXT PRIMARY KEY, m title TEXT, model TEXT, "
+       _id q += "backdrop TEXT,, symbol TEXT, page_url TEXT, "
         q += "gif_file_id TEXT, mpeg4_file_id TEXT, "
-        q += "added_by INTEGER, added_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+        q += "added u_by INTEGER, added_at TEXT DEFAULT CURRENT_TIMESTAMP)"
         c.execute(q)
         cols = {r["name"] for r in c.execute("PRAGMA table_info(nfts)")}
         if "mpeg4_file_id" not in cols:
@@ -102,7 +102,7 @@ def clean_html(v):
     s = BeautifulSoup(v or "", "html.parser")
     return " ".join(s.get_text(" ", strip=True).split())
 
-def save_nft(d, g_id, m_id, u_id):
+def save_nft(d, g_id):
     with db_conn() as c:
         q = "INSERT INTO nfts (slug, title, model, backdrop, symbol, "
         q += "page_url, gif_file_id, mpeg4_file_id, added_by) "
@@ -199,23 +199,25 @@ def conv_sync(json_path, mp4_path, work_dir):
         nf = len(frames)
         fps = max(1, min(math.ceil(ofps / FRAME_SKIP), MAX_FPS))
         
-        # 1. Задаем итоговый размер широкого холста
+        # Настраиваем холст
         out_w = MAX_DIM
         out_h = int(out_w / WIDE_RATIO)
         out_w = out_w if out_w % 2 == 0 else out_w - 1
         out_h = out_h if out_h % 2 == 0 else out_h - 1
+
+        # Рендерим модель во всю высоту холста
+        target_h = out_h
+        target_w = int(w * (target_h / h))
         
-        # 2. Вычисляем размер самой модельки
-        # Берем высоту холста и умножаем на MODEL_SCALE
-        target_model_size = int(out_h * MODEL_SCALE)
-        # Делаем размер модели четным
-        target_model_size = target_model_size if target_model_size % 2 == 0 else target_model_size - 1
+        # Если модель шире, чем наш холст - обрезаем края
+        if target_w > out_w:
+            target_w = out_w
+            target_h = int(h * (target_w / w))
 
-        # Координаты для вставки в центр
-        offset_x = (out_w - target_model_size) // 2
-        offset_y = (out_h - target_model_size) // 2
+        offset_x = (out_w - target_w) // 2
+        offset_y = (out_h - target_h) // 2
 
-        log.info(f"Render: Canvas {out_w}x{out_h}, Model {target_model_size}x{target_model_size}")
+        log.info(f"Render: Canvas {out_w}x{out_h}, Model {target_w}x{target_h}")
 
         fdir = work_dir / "frames"
         fdir.mkdir(parents=True, exist_ok=True)
@@ -223,16 +225,11 @@ def conv_sync(json_path, mp4_path, work_dir):
         for idx, i in enumerate(frames):
             fp = fdir / f"f_{idx:06d}.png"
             
-            # Рендерим только саму модель нужного размера
-            img = anim.render_pillow_frame(frame_num=i, width=target_model_size, height=target_model_size)
+            img = anim.render_pillow_frame(frame_num=i, width=target_w, height=target_h)
             
-            # Создаем широкий фон
-            if len(BG_COLOR) == 4:
-                bg = Image.new("RGBA", (out_w, out_h), BG_COLOR)
-            else:
-                bg = Image.new("RGB", (out_w, out_h), BG_COLOR)
+            # Создаем холст
+            bg = Image.new("RGBA", (out_w, out_h), BG_COLOR)
             
-            # Вставляем модель в центр
             if img.mode == "RGBA":
                 bg.paste(img, (offset_x, offset_y), img)
             else:
@@ -251,9 +248,6 @@ def conv_sync(json_path, mp4_path, work_dir):
             dst()
         anim = None
         
-        # Кодируем видео. 
-        # Так как в PNG есть альфа-канал (RGBA), при сборке в MP4 (yuv420p) 
-        # прозрачность заменится на черный цвет.
         cmd = [
             ff, "-y", "-framerate", str(fps),
             "-i", str(fdir / "f_%06d.png"),
