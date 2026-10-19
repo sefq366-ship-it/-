@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
-from PIL import Image
+from PIL import Image, ImageFilter
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message
@@ -29,20 +29,20 @@ BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 CARD_W = 1000
 CARD_H = 700
 
-# Размер самой модели внутри карточки (0.8 = 80% от высоты)
-MODEL_SCALE = 0.8 
+# Размер самой модели внутри карточки (0.6 = 60% от высоты)
+MODEL_SCALE = 0.6 
 
 # Скорость и качество
 FPS = 30
-FRAME_SKIP = 1 
+FRAME_SKIP = 2 # Пропуск кадров (2 или 3 для ускорения)
 MP4_CRF = 22
-MP4_PRESET = "ultrafast"
+MP4_PRESET = "ultrafast" # Максимальная скорость кодирования
 
 # ==============================================================================
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v14.2 Fix rlottie"
+VERSION = "v15.0 Stretched BG"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
@@ -213,34 +213,35 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
         fdir = work_dir / "frames"
         fdir.mkdir(parents=True, exist_ok=True)
         
-        # 1. Берем цвет фона из первого кадра
-        temp_img = anim.render_pillow_frame(frame_num=0, width=64, height=64)
-        bg_rgb = temp_img.convert("RGB")
-        c1 = bg_rgb.getpixel((5, 5))
-        bg_color = (c1[0], c1[1], c1[2], 255)
+        # 1. Создаем растянутый фон из оригинального паттерна
+        # Берем первый кадр, чтобы вытащить узоры
+        temp_img = anim.render_pillow_frame(frame_num=0, width=w, height=h)
+        # Растягиваем его на весь наш широкий холст
+        bg_stretched = temp_img.convert("RGB").resize((CARD_W, CARD_H), Image.Resampling.BICUBIC)
+        # Немного размываем, чтобы убрать саму модель с фона, оставив только узоры
+        bg_stretched = bg_stretched.filter(ImageFilter.GaussianBlur(radius=15))
         temp_img.close()
 
         for idx, i in enumerate(frames):
             fp = fdir / f"f_{idx:06d}.png"
             
-            # 2. Рендерим модель
+            # 2. Рендерим модель (с прозрачным фоном)
             img = anim.render_pillow_frame(
                 frame_num=i, 
                 width=model_w, 
                 height=model_h
             )
             
-            # 3. Создаем широкий холст
-            bg = Image.new("RGBA", (CARD_W, CARD_H), bg_color)
+            # 3. Накладываем модель на растянутый фон
+            bg = bg_stretched.copy()
             
-            # 4. Вставляем модель
             if img.mode == "RGBA":
                 bg.paste(img, (offset_x, offset_y), img)
             else:
                 bg.paste(img, (offset_x, offset_y))
             
             try:
-                bg.save(str(fp), format="PNG", compress_level=1)
+                bg.save(str(fp), format="PNG", compress_level=0) # compress_level=0 для скорости
             finally:
                 cl = getattr(img, "close", None)
                 if callable(cl): cl()
@@ -252,6 +253,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
             dst()
         anim = None
         
+        # 4. Ускоренная сборка видео (threads 0 = использовать все ядра)
         cmd = [
             ff, "-y", 
             "-framerate", str(fps),
@@ -261,6 +263,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
             "-preset", MP4_PRESET,
             "-crf", str(MP4_CRF),
             "-pix_fmt", MP4_PIX,
+            "-threads", "0", # Многопоточность
             "-movflags", "+faststart",
             str(mp4_path)
         ]
