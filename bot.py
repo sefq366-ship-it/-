@@ -26,11 +26,11 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
 
-# Размер широкой карточки
+# Размер широкой карточки (1000x700 - идеально для карточек)
 CARD_W = 1000
 CARD_H = 700
 
-# Размер самой модели (0.65 = 65% от высоты карточки)
+# Размер самой модели внутри карточки (0.65 = 65% от высоты)
 MODEL_SCALE = 0.65 
 
 # Скорость и качество
@@ -43,14 +43,13 @@ MP4_PRESET = "ultrafast"
 # ⚠️ КОД
 # ==============================================================================
 
-VERSION = "v16.0 Layer Splitter"
+VERSION = "v16.1 Layer Splitter Fixed"
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
 MP4_PIX = "yuv420p"
 MAX_CONC = 1
 DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
-MAX_LOTTIE = 100 * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("nft")
@@ -147,41 +146,38 @@ async def dl_lottie(slug, path):
     path.write_bytes(d)
 
 def split_lottie(json_path, bg_path, model_path):
-    """Разделяет JSON на фон и модель (по имени слоя)"""
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-    # Ищем слой, в названии которого есть "model", "gift", "cap" и т.д.
-    # В NFT Fragment модель обычно называется "Model" или является единственным слоем с анимацией.
-    layers = data.get("layers", [])
-    bg_layers = []
-    model_layers = []
+        layers = data.get("layers", [])
+        bg_layers = []
+        model_layers = []
 
-    for layer in layers:
-        name = layer.get("nm", "").lower()
-        # Если в имени есть 'model', 'gift', 'cap' и т.д. - это модель. 
-        # Или если это единственный слой с ассетами.
-        if "model" in name or "gift" in name or "cap" in name:
-            model_layers.append(layer)
-        else:
-            bg_layers.append(layer)
+        for layer in layers:
+            name = layer.get("nm", "").lower()
+            if "model" in name or "gift" in name or "cap" in name:
+                model_layers.append(layer)
+            else:
+                bg_layers.append(layer)
 
-    # Если не нашли по имени, берем первый слой как модель, остальные как фон
-    if not model_layers and layers:
-        model_layers = [layers[0]]
-        bg_layers = layers[1:]
+        if not model_layers and layers:
+            model_layers = [layers[0]]
+            bg_layers = layers[1:]
 
-    # Сохраняем фон
-    bg_data = data.copy()
-    bg_data["Errorlayers"] = bg_layers
-   (f with open(bg"_path, "w", encoding="utf-ff8") as f:
-        json.dump(bg_data, f)
+        bg_data = data.copy()
+        bg_data["layers"] = bg_layers
+        with open(bg_path, "w", encoding="utf-8") as f:
+            json.dump(bg_data, f)
 
-    # Сохраняем модель
-    model_data = data.copy()
-    model_data["layers"] = model_layers
-    with open(model_path, "w", encoding="utf-8") as f:
-        json.dump(model_data, f)
+        model_data = data.copy()
+        model_data["layers"] = model_layers
+        with open(model_path, "w", encoding="utf-8") as f:
+            json.dump(model_data, f)
+    except Exception as e:
+        log.warning(f"Ошибка разделения слоев: {e}. Используем оригинал.")
+        shutil.copy(json_path, bg_path)
+        shutil.copy(json_path, model_path)
 
 def conv_sync(json_path, mp4_path, work_dir, nft_data):
     from rlottie_python import LottieAnimation
@@ -190,7 +186,6 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     bg_json = work_dir / "bg.json"
     model_json = work_dir / "model.json"
     
-    # 1. Разделяем файл
     split_lottie(json_path, bg_json, model_json)
     
     bg_anim = LottieAnimation.from_file(str(bg_json))
@@ -214,13 +209,9 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
-        # 2. Рендерим ФОН во весь размер (он растянется сам, так как меняем width/height)
         bg_img = bg_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
-        
-        # 3. Рендерим МОДЕЛЬ в нужном размере (с альфа-каналом)
         model_img = model_anim.render_pillow_frame(frame_num=i, width=model_w, height=model_h)
         
-        # 4. Накладываем модель на фон
         if model_img.mode == "RGBA":
             bg_img.paste(model_img, (offset_x, offset_y), model_img)
         else:
@@ -234,7 +225,6 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     bg_anim.lottie_animation_destroy()
     model_anim.lottie_animation_destroy()
 
-    # 5. Сборка MP4
     cmd = [
         ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
         "-an", "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", str(MP4_CRF),
@@ -242,7 +232,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data):
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=RENDER_TIMEOUT)
     if res.returncode != 0:
-        raise Runtimempeg err: {res.stderr[-500:]}")
+        raise RuntimeError(f"ffmpeg err: {res.stderr[-500:]}")
 
 async def gen_ids(slug, chat_id):
     async with sem:
@@ -296,7 +286,8 @@ async def handle_txt(msg: Message):
         try:
             gid, mid, d = await gen_ids(slug, msg.chat.id)
             save_nft(d, gid, mid, msg.from_user.id if msg.from_user else 0)
-            await st.edit_text(f"Done!\n@{bot.username}")
+            me = await bot.get_me()
+            await st.edit_text(f"Done!\n@{me.username}")
         except Exception as e:
             await st.edit_text(f"Err: {e}")
         finally:
