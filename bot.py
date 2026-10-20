@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import re
 import json
+import os
 import io
 from pathlib import Path
 import aiohttp
@@ -17,18 +18,20 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, InlineQueryResultCachedMpeg4Gif, FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
+import pyppeteer
 
 # ==============================================================================
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v52.0 Super Fast (rlottie + webp)"
+VERSION = "v53.0 Perfect Visual & Fast"
 
-# Твои настройки для скорости
 CARD_W = 1024
 CARD_H = 576
+
 FPS = 60
 FRAME_SKIP = 5 
+
 MP4_CRF = 28
 MP4_PRESET = "ultrafast"
 MP4_PIX = "yuv420p"
@@ -49,6 +52,8 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 sem = asyncio.Semaphore(MAX_CONC)
 locks = {}
+
+browser_instance = None
 
 NFT_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)", re.I)
 LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
@@ -132,57 +137,102 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
-async def get_webp_image(slug):
-    url = f"https://nft.fragment.com/gift/{slug}.webp"
-    async with aiohttp.ClientSession(headers={"User-Agent": UA}) as s:
-        async with s.get(url) as r:
-            if r.status == 200:
-                data = await r.read()
-                return Image.open(io.BytesIO(data)).convert("RGBA")
-    return None
-
-# --- РЕНДЕР ЧЕРЕЗ RLOTTIE (БЕЗ CHROMIUM) ---
-def conv_sync(json_path, mp4_path, work_dir, nft_data, webp_img):
-    from rlottie_python import LottieAnimation
+# --- РЕНДЕР ЧЕРЕЗ CHROMIUM (ЛОГИКА ИЗ 41.1) ---
+async def render_via_chromium(browser, json_path, mp4_path, work_dir, nft_data):
     ff = check_ff()
     
-    anim = LottieAnimation.from_file(str(json_path))
-    tf = int(anim.lottie_animation_get_totalframe())
-    ofps = float(anim.lottie_animation_get_framerate())
-    frames = range(0, tf, FRAME_SKIP)
-    fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
+    with open(json_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
 
-    orig_size = CARD_H 
-    offset_y = (CARD_H - orig_size) // 2
-    offset_x = (CARD_W - orig_size) // 2
+    comp_w = int(data.get('w', 512))
+    comp_h = int(data.get('h', 512))
+    frame_rate = float(data.get('fr', 60))
+    ip, op = float(data.get('ip', 0)), float(data.get('op', 1))
+    
+    step = max(1, round(frame_rate / FPS))
+    frame_numbers = list(range(int(ip), int(op), step)) or [int(ip)]
+    frame_numbers = frame_numbers[::FRAME_SKIP]
+    
+    final_fps = max(1, math.ceil(FPS / FRAME_SKIP))
 
+    layers = data.get('layers', [])
+    bg_names = {'Background', 'Pattern', 'Color Icon'}
+    anim_names = {'Gift'}
+    bg_layers = [x for x in layers if x.get('nm') in bg_names]
+    anim_layers = [x for x in layers if x.get('nm') in anim_names]
+    
+    if not bg_layers or not anim_layers:
+        raise RuntimeError("Не найдены слои Background/Pattern или Gift")
+
+    bg_data = dict(data); bg_data['layers'] = bg_layers
+    anim_data = dict(data); anim_data['layers'] = anim_layers
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+        <style>
+            body {{ margin: 0; padding: 0; background: transparent; overflow: hidden; }}
+            #bg {{ position: absolute; top: 0; left: 0; width: {CARD_W}px; height: {CARD_H}px; }}
+            #gift {{ position: absolute; top: {(CARD_H - comp_h)//2}px; left: {(CARD_W - comp_w)//2}px; width: {comp_w}px; height: {comp_h}px; }}
+            #bg svg {{ width: 100% !important; height: 100% !important; }}
+            #gift svg {{ width: 100% !important; height: 100% !important; }}
+        </style>
+    </head>
+    <body>
+        <div id="bg"></div>
+        <div id="gift"></div>
+        <script>
+            const bgAnim = lottie.loadAnimation({{
+                container: document.getElementById('bg'),
+                renderer: 'svg',
+                loop: false,
+                autoplay: false,
+                animationData: {json.dumps(bg_data)},
+                rendererSettings: {{ preserveAspectRatio: 'none' }}
+            }});
+            const giftAnim = lottie.loadAnimation({{
+                container: document.getElementById('gift'),
+                renderer: 'svg',
+                loop: false,
+                autoplay: false,
+                animationData: {json.dumps(anim_data)},
+                rendererSettings: {{ preserveAspectRatio: 'xMidYMid meet' }}
+            }});
+            
+            window.setFrame = (f) => {{
+                bgAnim.goToAndStop(f, true);
+                giftAnim.goToAndStop(f, true);
+            }};
+            window.ready = true;
+        </script>
+    </body>
+    </html>
+    """
+    
+    html_path = work_dir / "render.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    page = await browser.newPage()
+    await page.setViewport({'width': CARD_W, 'height': CARD_H})
+    await page.goto(f"file://{html_path}")
+    await page.waitForFunction('window.ready === true')
+    
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
-
-    for idx, i in enumerate(frames):
+    
+    for idx, i in enumerate(frame_numbers):
+        await page.evaluate(f'setFrame({i})')
         fp = fdir / f"f_{idx:06d}.png"
-        
-        if webp_img:
-            canvas = webp_img.resize((CARD_W, CARD_H), Image.Resampling.BILINEAR)
-        else:
-            canvas = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 40, 255))
-            
-        model_img = anim.render_pillow_frame(frame_num=i, width=orig_size, height=orig_size)
-        
-        if model_img.mode == "RGBA":
-            canvas.paste(model_img, (offset_x, offset_y), model_img)
-        else:
-            canvas.paste(model_img, (offset_x, offset_y))
-        
-        canvas.convert("RGB").save(str(fp), format="PNG", compress_level=0)
-        
-        canvas.close()
-        if model_img: model_img.close()
-
-    anim.lottie_animation_destroy()
-
+        # УБРАЛИ clip (он тормозил)
+        await page.screenshot({'path': str(fp), 'omitBackground': True})
+    
+    await page.close()
+    
     cmd = [
-        ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
+        ff, "-y", "-framerate", str(final_fps), "-i", str(fdir / "f_%06d.png"),
         "-an", "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", str(MP4_CRF),
         "-pix_fmt", MP4_PIX, "-threads", "0", "-movflags", "+faststart", str(mp4_path)
     ]
@@ -190,7 +240,7 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data, webp_img):
     if res.returncode != 0:
         raise RuntimeError(f"ffmpeg err: {res.stderr[-500:]}")
 
-async def gen_ids(slug, chat_id):
+async def gen_ids(browser, slug, chat_id):
     async with sem:
         with tempfile.TemporaryDirectory() as tmp:
             wd = Path(tmp)
@@ -199,9 +249,7 @@ async def gen_ids(slug, chat_id):
             
             await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
-            webp_img = await get_webp_image(slug)
-            
-            await asyncio.to_thread(conv_sync, jp, mp, wd, d, webp_img)
+            await render_via_chromium(browser, jp, mp, wd, d)
             
             mid = None
             try:
@@ -247,7 +295,7 @@ async def handle_txt(msg: Message):
 
         st = await msg.answer("Wait...")
         try:
-            gid, mid, d = await gen_ids(slug, msg.chat.id)
+            gid, mid, d = await gen_ids(browser_instance, slug, msg.chat.id)
             save_nft(d, gid, mid, msg.from_user.id if msg.from_user else 0)
             me = await bot.get_me()
             await st.edit_text(f"Done!\n@{me.username}")
@@ -272,13 +320,23 @@ async def inline(q: InlineQuery):
     except: pass
 
 async def main():
+    global browser_instance
     init_db()
+    
+    log.info("Запускаю Chromium...")
+    browser_instance = await pyppeteer.launch(
+        headless=True,
+        executablePath='/usr/bin/chromium',
+        args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] # Убрали --disable-gpu
+    )
+    
     try:
         check_ff()
         me = await bot.get_me()
         print(f"Started @{me.username}")
         await dp.start_polling(bot, close_bot_session=False)
     finally:
+        await browser_instance.close()
         await bot.session.close()
 
 if __name__ == "__main__":
