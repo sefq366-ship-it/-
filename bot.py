@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import re
 import json
-import os
+import io
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
@@ -17,13 +17,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, InlineQueryResultCachedMpeg4Gif, FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
-import pyppeteer
 
 # ==============================================================================
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v32.1 Chromium Render (System Path)"
+VERSION = "v33.0 Clean PNG Asset"
 
 CARD_W = 1280
 CARD_H = 720
@@ -126,89 +125,64 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
-# --- РЕНДЕР ЧЕРЕЗ CHROMIUM ---
-async def render_via_chromium(json_path, mp4_path, work_dir, nft_data):
+async def get_official_bg(slug):
+    url = f"https://nft.fragment.com/gift/{slug}.json"
+    async with aiohttp.ClientSession(headers={"User-Agent": UA}) as s:
+        try:
+            async with s.get(url) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    p_url = data.get("pattern_png_url")
+                    if p_url:
+                        async with s.get(p_url) as r2:
+                            if r2.status == 200:
+                                img_data = await r2.read()
+                                return Image.open(io.BytesIO(img_data)).convert("RGBA")
+        except:
+            pass
+    return None
+
+def conv_sync(json_path, mp4_path, work_dir, nft_data, bg_img):
+    from rlottie_python import LottieAnimation
     ff = check_ff()
     
-    with open(json_path, "r", encoding="utf-8") as f:
-        lottie_data = json.load(f)
-
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
-        <style>
-            body {{ margin: 0; padding: 0; background: transparent; overflow: hidden; }}
-            #bg-container {{ position: absolute; top: 0; left: 0; width: {CARD_W}px; height: {CARD_H}px; }}
-            #model-container {{ position: absolute; top: {(CARD_H - MODEL_SIZE)//2}px; left: {(CARD_W - MODEL_SIZE)//2}px; width: {MODEL_SIZE}px; height: {MODEL_SIZE}px; }}
-        </style>
-    </head>
-    <body>
-        <div id="bg-container"></div>
-        <div id="model-container"></div>
-        <script>
-            const animData = {json.dumps(lottie_data)};
-            
-            const bgAnim = lottie.loadAnimation({{
-                container: document.getElementById('bg-container'),
-                renderer: 'svg',
-                loop: false,
-                autoplay: false,
-                animationData: JSON.parse(JSON.stringify(animData))
-            }});
-            
-            const modelAnim = lottie.loadAnimation({{
-                container: document.getElementById('model-container'),
-                renderer: 'svg',
-                loop: false,
-                autoplay: false,
-                animationData: JSON.parse(JSON.stringify(animData))
-            }});
-            
-            window.setFrame = (frame) => {{
-                bgAnim.goToAndStop(frame, true);
-                modelAnim.goToAndStop(frame, true);
-            }};
-            
-            window.ready = true;
-        </script>
-    </body>
-    </html>
-    """
-    
-    html_path = work_dir / "render.html"
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-    # ЗАПУСКАЕМ БРАУЗЕР (используя системный Chromium)
-    browser = await pyppeteer.launch(
-        headless=True,
-        executablePath='/usr/bin/chromium', # <--- ВАЖНОЕ ИСПРАВЛЕНИЕ
-        args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-    )
-    
-    page = await browser.newPage()
-    await page.setViewport({'width': CARD_W, 'height': CARD_H})
-    
-    await page.goto(f"file://{html_path}")
-    await page.waitForFunction('window.ready === true')
-    
-    tf = int(lottie_data.get("op", 60))
-    ofps = float(lottie_data.get("fr", 30))
+    anim = LottieAnimation.from_file(str(json_path))
+    tf = int(anim.lottie_animation_get_totalframe())
+    ofps = float(anim.lottie_animation_get_framerate())
     frames = range(0, tf, FRAME_SKIP)
     fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
-    
+
+    orig_size = MODEL_SIZE
+    offset_y = (CARD_H - orig_size) // 2
+    offset_x = (CARD_W - orig_size) // 2
+
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
-    
+
+    log.info(f"Render: {CARD_W}x{CARD_H}, PNG Asset mode")
+
     for idx, i in enumerate(frames):
-        await page.evaluate(f'setFrame({i})')
         fp = fdir / f"f_{idx:06d}.png"
-        await page.screenshot({'path': str(fp), 'omitBackground': True})
-    
-    await browser.close()
-    
+        
+        if bg_img:
+            canvas = bg_img.resize((CARD_W, CARD_H), Image.Resampling.NEAREST)
+        else:
+            canvas = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 40, 255))
+            
+        model_img = anim.render_pillow_frame(frame_num=i, width=orig_size, height=orig_size)
+        
+        if model_img.mode == "RGBA":
+            canvas.paste(model_img, (offset_x, offset_y), model_img)
+        else:
+            canvas.paste(model_img, (offset_x, offset_y))
+        
+        canvas.convert("RGB").save(str(fp), format="PNG", compress_level=0)
+        
+        canvas.close()
+        if model_img: model_img.close()
+
+    anim.lottie_animation_destroy()
+
     cmd = [
         ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
         "-an", "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", str(MP4_CRF),
@@ -227,7 +201,10 @@ async def gen_ids(slug, chat_id):
             
             await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
-            await render_via_chromium(jp, mp, wd, d)
+            
+            bg_img = await get_official_bg(slug)
+            
+            await asyncio.to_thread(conv_sync, jp, mp, wd, d, bg_img)
             
             mid = None
             try:
