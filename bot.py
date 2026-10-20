@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import re
 import json
+import os
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
@@ -16,29 +17,21 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, InlineQueryResultCachedMpeg4Gif, FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
+import pyppeteer
 
 # ==============================================================================
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v27.0 Hybrid Split (rlottie render)"
+VERSION = "v32.1 Chromium Render (System Path)"
 
-# Размер видео 16:9
 CARD_W = 1280
 CARD_H = 720
-
-# Размер оригинального квадрата в центре (720 = во всю высоту)
 MODEL_SIZE = 720 
-
-# Скорость и качество
 FPS = 30
 FRAME_SKIP = 2 
 MP4_CRF = 22
 MP4_PRESET = "ultrafast"
-
-# ==============================================================================
-# ⚠️ КОД
-# ==============================================================================
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
@@ -133,97 +126,89 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
-def isolate_layers(json_path, bg_path, model_path):
-    """Разрезает JSON на фон и модель, используя имена слоев"""
-    try:
-        with open(json_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        layers = data.get("layers", [])
-        bg_layers = []
-        model_layers = []
-
-        for layer in layers:
-            name = layer.get("nm", "").lower()
-            # Ищем слой модели по ключевым словам
-            if "model" in name or "gift" in name or "cap" in name:
-                model_layers.append(layer)
-            else:
-                bg_layers.append(layer)
-
-        # Если не нашли по имени, берем самый большой слой как модель
-        if not model_layers:
-            model_layers = [layers[0]]
-            bg_layers = layers[1:]
-
-        bg_data = data.copy()
-        bg_data["layers"] = bg_layers
-        with open(bg_path, "w", encoding="utf-8") as f:
-            json.dump(bg_data, f)
-
-        model_data = data.copy()
-        model_data["layers"] = model_layers
-        with open(model_path, "w", encoding="utf-8") as f:
-            json.dump(model_data, f)
-            
-    except Exception as e:
-        log.warning(f"Ошибка разделения: {e}. Рендерим как есть.")
-        shutil.copy(json_path, bg_path)
-        shutil.copy(json_path, model_path)
-
-def conv_sync(json_path, mp4_path, work_dir, nft_data):
-    from rlottie_python import LottieAnimation
+# --- РЕНДЕР ЧЕРЕЗ CHROMIUM ---
+async def render_via_chromium(json_path, mp4_path, work_dir, nft_data):
     ff = check_ff()
     
-    bg_json = work_dir / "bg.json"
-    model_json = work_dir / "model.json"
+    with open(json_path, "r", encoding="utf-8") as f:
+        lottie_data = json.load(f)
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/bodymovin/5.12.2/lottie.min.js"></script>
+        <style>
+            body {{ margin: 0; padding: 0; background: transparent; overflow: hidden; }}
+            #bg-container {{ position: absolute; top: 0; left: 0; width: {CARD_W}px; height: {CARD_H}px; }}
+            #model-container {{ position: absolute; top: {(CARD_H - MODEL_SIZE)//2}px; left: {(CARD_W - MODEL_SIZE)//2}px; width: {MODEL_SIZE}px; height: {MODEL_SIZE}px; }}
+        </style>
+    </head>
+    <body>
+        <div id="bg-container"></div>
+        <div id="model-container"></div>
+        <script>
+            const animData = {json.dumps(lottie_data)};
+            
+            const bgAnim = lottie.loadAnimation({{
+                container: document.getElementById('bg-container'),
+                renderer: 'svg',
+                loop: false,
+                autoplay: false,
+                animationData: JSON.parse(JSON.stringify(animData))
+            }});
+            
+            const modelAnim = lottie.loadAnimation({{
+                container: document.getElementById('model-container'),
+                renderer: 'svg',
+                loop: false,
+                autoplay: false,
+                animationData: JSON.parse(JSON.stringify(animData))
+            }});
+            
+            window.setFrame = (frame) => {{
+                bgAnim.goToAndStop(frame, true);
+                modelAnim.goToAndStop(frame, true);
+            }};
+            
+            window.ready = true;
+        </script>
+    </body>
+    </html>
+    """
     
-    isolate_layers(json_path, bg_json, model_json)
+    html_path = work_dir / "render.html"
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    # ЗАПУСКАЕМ БРАУЗЕР (используя системный Chromium)
+    browser = await pyppeteer.launch(
+        headless=True,
+        executablePath='/usr/bin/chromium', # <--- ВАЖНОЕ ИСПРАВЛЕНИЕ
+        args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+    )
     
-    # Загружаем обе части через rlottie
-    bg_anim = LottieAnimation.from_file(str(bg_json))
-    model_anim = LottieAnimation.from_file(str(model_json))
+    page = await browser.newPage()
+    await page.setViewport({'width': CARD_W, 'height': CARD_H})
     
-    tf = int(bg_anim.lottie_animation_get_totalframe())
-    ofps = float(bg_anim.lottie_animation_get_framerate())
+    await page.goto(f"file://{html_path}")
+    await page.waitForFunction('window.ready === true')
+    
+    tf = int(lottie_data.get("op", 60))
+    ofps = float(lottie_data.get("fr", 30))
     frames = range(0, tf, FRAME_SKIP)
     fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
-
-    orig_size = MODEL_SIZE
-    orig_size = orig_size if orig_size % 2 == 0 else orig_size - 1
     
-    offset_y = (CARD_H - orig_size) // 2
-    offset_x = (CARD_W - orig_size) // 2
-
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
-
-    log.info(f"Render: {CARD_W}x{CARD_H}, Hybrid mode")
-
+    
     for idx, i in enumerate(frames):
+        await page.evaluate(f'setFrame({i})')
         fp = fdir / f"f_{idx:06d}.png"
-        
-        # 1. Рендерим ТОЛЬКО фон и паттерн, растягивая на весь экран
-        bg_img = bg_anim.render_pillow_frame(frame_num=i, width=CARD_W, height=CARD_H)
-        
-        # 2. Рендерим ТОЛЬКО модель, в оригинальном размере
-        model_img = model_anim.render_pillow_frame(frame_num=i, width=orig_size, height=orig_size)
-        
-        # 3. Накладываем модель по центру
-        if model_img.mode == "RGBA":
-            bg_img.paste(model_img, (offset_x, offset_y), model_img)
-        else:
-            bg_img.paste(model_img, (offset_x, offset_y))
-        
-        # 4. Сохраняем кадр
-        bg_img.convert("RGB").save(str(fp), format="PNG", compress_level=0)
-        
-        bg_img.close()
-        model_img.close()
-
-    bg_anim.lottie_animation_destroy()
-    model_anim.lottie_animation_destroy()
-
+        await page.screenshot({'path': str(fp), 'omitBackground': True})
+    
+    await browser.close()
+    
     cmd = [
         ff, "-y", "-framerate", str(fps), "-i", str(fdir / "f_%06d.png"),
         "-an", "-c:v", "libx264", "-preset", MP4_PRESET, "-crf", str(MP4_CRF),
@@ -242,7 +227,7 @@ async def gen_ids(slug, chat_id):
             
             await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
-            await asyncio.to_thread(conv_sync, jp, mp, wd, d)
+            await render_via_chromium(jp, mp, wd, d)
             
             mid = None
             try:
