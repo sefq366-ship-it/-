@@ -8,37 +8,33 @@ import subprocess
 import tempfile
 import re
 import json
-import os
 import io
 from pathlib import Path
 import aiohttp
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.types import Message, InlineQuery, InlineQueryResultCachedGif, InlineQueryResultCachedMpeg4Gif, FSInputFile
 from aiogram.exceptions import TelegramUnauthorizedError
-import pyppeteer
 
 # ==============================================================================
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v42.0 Tiled Pattern"
+VERSION = "v52.0 Super Fast (rlottie + webp)"
 
-CARD_W = 1280
-CARD_H = 720
-FPS = 30
-FRAME_SKIP = 2 
-MP4_CRF = 22
+# Твои настройки для скорости
+CARD_W = 1024
+CARD_H = 576
+FPS = 60
+FRAME_SKIP = 5 
+MP4_CRF = 28
 MP4_PRESET = "ultrafast"
-
-# Размер ячейки паттерна (чем меньше, тем мельче иконки)
-TILE_SIZE = 256 
+MP4_PIX = "yuv420p"
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "nfts.sqlite3"
-MP4_PIX = "yuv420p"
 MAX_CONC = 1
 DL_TIMEOUT = 120
 RENDER_TIMEOUT = 600
@@ -53,8 +49,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 sem = asyncio.Semaphore(MAX_CONC)
 locks = {}
-
-browser_instance = None
 
 NFT_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/nft/([A-Za-z0-9_-]+)", re.I)
 LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
@@ -138,24 +132,17 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
-async def get_pattern_png(slug):
-    url = f"https://nft.fragment.com/gift/{slug}.json"
+async def get_webp_image(slug):
+    url = f"https://nft.fragment.com/gift/{slug}.webp"
     async with aiohttp.ClientSession(headers={"User-Agent": UA}) as s:
-        try:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    p_url = data.get("pattern_png_url")
-                    if p_url:
-                        async with s.get(p_url) as r2:
-                            if r2.status == 200:
-                                img_data = await r2.read()
-                                return Image.open(io.BytesIO(img_data)).convert("RGBA")
-        except:
-            pass
+        async with s.get(url) as r:
+            if r.status == 200:
+                data = await r.read()
+                return Image.open(io.BytesIO(data)).convert("RGBA")
     return None
 
-def conv_sync(json_path, mp4_path, work_dir, nft_data, pattern_img):
+# --- РЕНДЕР ЧЕРЕЗ RLOTTIE (БЕЗ CHROMIUM) ---
+def conv_sync(json_path, mp4_path, work_dir, nft_data, webp_img):
     from rlottie_python import LottieAnimation
     ff = check_ff()
     
@@ -165,28 +152,21 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data, pattern_img):
     frames = range(0, tf, FRAME_SKIP)
     fps = max(1, min(math.ceil(ofps / FRAME_SKIP), FPS))
 
-    orig_size = 720
+    orig_size = CARD_H 
     offset_y = (CARD_H - orig_size) // 2
     offset_x = (CARD_W - orig_size) // 2
 
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
 
-    # Создаем паттерн (плитку) один раз
-    bg_canvas = Image.new("RGBA", (CARD_W, CARD_H), (0, 0, 0, 0))
-    if pattern_img:
-        # Масштабируем паттерн до нужного размера (TILE_SIZE)
-        tile = pattern_img.resize((TILE_SIZE, TILE_SIZE), Image.Resampling.NEAREST)
-        for x in range(0, CARD_W, TILE_SIZE):
-            for y in range(0, CARD_H, TILE_SIZE):
-                bg_canvas.paste(tile, (x, y), tile)
-    else:
-        bg_canvas = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 40, 255))
-
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
-        canvas = bg_canvas.copy()
+        if webp_img:
+            canvas = webp_img.resize((CARD_W, CARD_H), Image.Resampling.BILINEAR)
+        else:
+            canvas = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 40, 255))
+            
         model_img = anim.render_pillow_frame(frame_num=i, width=orig_size, height=orig_size)
         
         if model_img.mode == "RGBA":
@@ -219,16 +199,18 @@ async def gen_ids(slug, chat_id):
             
             await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
+            webp_img = await get_webp_image(slug)
             
-            pattern_img = await get_pattern_png(slug)
-            
-            # Используем rlottie для рендера (он стабильнее)
-            from rlottie_python import LottieAnimation
-            await asyncio.to_thread(conv_sync, jp, mp, wd, d, pattern_img)
+            await asyncio.to_thread(conv_sync, jp, mp, wd, d, webp_img)
             
             mid = None
             try:
-                msg = await bot.send_animation(chat_id=chat_id, animation=FSInputFile(str(mp), filename=f"{slug}.mp4"), caption=f"NFT: {slug}")
+                msg = await bot.send_animation(
+                    chat_id=chat_id, 
+                    animation=FSInputFile(str(mp), filename=f"{slug}.mp4"), 
+                    caption=f"NFT: {slug}",
+                    request_timeout=300
+                )
                 if msg.animation: mid = msg.animation.file_id
             except Exception:
                 log.exception("send err")
