@@ -6,7 +6,20 @@ RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
     ffmpeg \
+    chromium \
+    libgbm1 \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libgtk-3-0 \
+    libnspr4 \
+    libnss3 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
+
+# Указываем pyppeteer использовать системный Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 WORKDIR /app
 COPY requirements.txt .
