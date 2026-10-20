@@ -22,7 +22,7 @@ from aiogram.exceptions import TelegramUnauthorizedError
 # ⚙️ НАСТРОЙКИ
 # ==============================================================================
 BOT_TOKEN = "ВСТАВЬ_СВОЙ_ТОКЕН_СЮДА"
-VERSION = "v33.0 Clean PNG Asset"
+VERSION = "v34.0 WebP Stretch"
 
 CARD_W = 1280
 CARD_H = 720
@@ -125,24 +125,16 @@ async def dl_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
-async def get_official_bg(slug):
-    url = f"https://nft.fragment.com/gift/{slug}.json"
+async def get_webp_image(slug):
+    url = f"https://nft.fragment.com/gift/{slug}.webp"
     async with aiohttp.ClientSession(headers={"User-Agent": UA}) as s:
-        try:
-            async with s.get(url) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    p_url = data.get("pattern_png_url")
-                    if p_url:
-                        async with s.get(p_url) as r2:
-                            if r2.status == 200:
-                                img_data = await r2.read()
-                                return Image.open(io.BytesIO(img_data)).convert("RGBA")
-        except:
-            pass
+        async with s.get(url) as r:
+            if r.status == 200:
+                data = await r.read()
+                return Image.open(io.BytesIO(data)).convert("RGBA")
     return None
 
-def conv_sync(json_path, mp4_path, work_dir, nft_data, bg_img):
+def conv_sync(json_path, mp4_path, work_dir, nft_data, webp_img):
     from rlottie_python import LottieAnimation
     ff = check_ff()
     
@@ -159,13 +151,12 @@ def conv_sync(json_path, mp4_path, work_dir, nft_data, bg_img):
     fdir = work_dir / "frames"
     fdir.mkdir(parents=True, exist_ok=True)
 
-    log.info(f"Render: {CARD_W}x{CARD_H}, PNG Asset mode")
-
     for idx, i in enumerate(frames):
         fp = fdir / f"f_{idx:06d}.png"
         
-        if bg_img:
-            canvas = bg_img.resize((CARD_W, CARD_H), Image.Resampling.NEAREST)
+        if webp_img:
+            # Растягиваем готовую картинку с фоном и паттерном на весь экран
+            canvas = webp_img.resize((CARD_W, CARD_H), Image.Resampling.BILINEAR)
         else:
             canvas = Image.new("RGBA", (CARD_W, CARD_H), (30, 30, 40, 255))
             
@@ -202,9 +193,9 @@ async def gen_ids(slug, chat_id):
             await dl_file(LOTTIE_URL.format(slug=slug), jp)
             d = await fetch_meta(slug)
             
-            bg_img = await get_official_bg(slug)
+            webp_img = await get_webp_image(slug)
             
-            await asyncio.to_thread(conv_sync, jp, mp, wd, d, bg_img)
+            await asyncio.to_thread(conv_sync, jp, mp, wd, d, webp_img)
             
             mid = None
             try:
