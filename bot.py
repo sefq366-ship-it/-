@@ -1,10 +1,10 @@
 # ============================================================
-# bot.py — Gram2Profit v1.2.5
-# v1.2.5:
-#   - inline карточки грузятся сразу (build_inline_plain async + без sleep)
-#   - гифки в инлайне только для админа
-#   - Lottie 404 → мягкая ошибка, сделка сохраняется
-#   - caption под гифкой сохраняется с премиум-эмодзи
+# bot.py — Gram2Profit v1.2.7
+# v1.2.7:
+#   - ретрай рендера 3 раза с интервалом 5 мин
+#   - в инлайне: pending → ⏳ "Гифка генерируется", error → текстовая карточка
+#   - если Fragment не отдал ни Lottie, ни .webp → текстовая карточка
+#     с премиум-эмодзи (без серых заглушек)
 # ============================================================
 
 import subprocess
@@ -62,7 +62,7 @@ from messages import MESSAGES
 import gif_db
 import gif_renderer
 
-BOT_TOKEN = "8544U"
+BOT_TOKEN = "85"
 ADMIN_IDS = [1012040843]
 DB_PATH = "sales.db"
 BOT_URL = "https://t.me/Stars2ProfitBot"
@@ -70,7 +70,7 @@ BOT_URL = "https://t.me/Stars2ProfitBot"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.2.5 (gif-inline, link-first, timer-autoclean, admin-only-gif)"
+VERSION = "v1.2.7 (retry-gif, inline-status, no-placeholder)"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
@@ -1128,8 +1128,16 @@ async def cleanup_timers_for_pending(conn, pending_id: int, nft_link: str, user_
     return deleted
 
 
+# ============================================================
+# v1.2.7: генерация гифки с ретраем 3 раза
+# ============================================================
 async def generate_gif_background(slug_full: str, slug_short: str, number: int,
-                                   nft_link: str, nft_data: dict, user_id: int):
+                                   nft_link: str, nft_data: dict, user_id: int, attempt: int = 1):
+    """
+    v1.2.7: 3 попытки с интервалом 5 минут.
+    Если Fragment не отдал ни Lottie, ни .webp — статус 'error',
+    в инлайне покажется текстовая карточка с премиум-эмодзи.
+    """
     existing = await gif_db.gif_get_ready(slug_full)
     if existing:
         logger.info(f"[gif] {slug_full}: уже в кэше, пропускаем")
@@ -1149,7 +1157,7 @@ async def generate_gif_background(slug_full: str, slug_short: str, number: int,
     mp4_path = None
     work_dir = None
     try:
-        logger.info(f"[gif] {slug_full}: старт рендера")
+        logger.info(f"[gif] {slug_full}: старт рендера (attempt {attempt})")
         mp4_path, work_dir = await gif_renderer.render_to_tempfile(slug_full)
 
         admin_chat = ADMIN_IDS[0]
@@ -1174,7 +1182,13 @@ async def generate_gif_background(slug_full: str, slug_short: str, number: int,
         if not file_id:
             raise RuntimeError("Telegram не вернул file_id")
 
-        # v1.2.5: caption с премиум-эмодзи
+        cached = await gif_db.gif_get(slug_full)
+        if cached:
+            for k in ("model_emoji_id", "backdrop_emoji_id", "symbol_emoji_id",
+                      "collection_emoji_id", "model_rarity", "backdrop_rarity", "symbol_rarity"):
+                if not nft_data.get(k) and cached.get(k):
+                    nft_data[k] = cached[k]
+
         caption = _build_gif_caption(nft_data)
         await gif_db.gif_set_ready(slug_full, file_id, nft_data, caption,
                                     params_json=json.dumps(gif_renderer.DEFAULT_PARAMS))
@@ -1182,11 +1196,12 @@ async def generate_gif_background(slug_full: str, slug_short: str, number: int,
 
     except Exception as e:
         err_str = str(e)
-        if "404" in err_str or "Lottie" in err_str:
-            logger.warning(f"[gif] {slug_full}: Lottie недоступен (новая коллекция?) — пропускаем")
+        logger.warning(f"[gif] {slug_full}: attempt {attempt} failed: {err_str[:200]}")
+        if attempt < 3:
+            asyncio.create_task(_retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt + 1))
         else:
-            logger.exception(f"[gif] {slug_full}: ошибка рендера")
-        await gif_db.gif_set_error(slug_full, err_str[:1000])
+            logger.error(f"[gif] {slug_full}: все 3 попытки провалились — статус error")
+            await gif_db.gif_set_error(slug_full, err_str[:1000])
     finally:
         if work_dir and work_dir.exists():
             try:
@@ -1194,7 +1209,18 @@ async def generate_gif_background(slug_full: str, slug_short: str, number: int,
             except:
                 pass
 
-    
+
+async def _retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt):
+    """v1.2.7: ретрай через 5 минут."""
+    await asyncio.sleep(300)
+    logger.info(f"[gif] {slug_full}: ретрай #{attempt}")
+    try:
+        await gif_db.gif_delete(slug_full)
+    except:
+        pass
+    await generate_gif_background(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt)
+
+
 
 # ---------- КЛАВИАТУРЫ ----------
 def get_main_kb(lang="ru"):
@@ -2924,6 +2950,11 @@ async def goal_later(callback: CallbackQuery):
 
 # ============================================================
 # ИНЛАЙН-РЕЖИМ
+# v1.2.7:
+#   - только сделки
+#   - ready → MP4 с caption
+#   - pending → Article с "⏳ Гифка генерируется"
+#   - error/нет → Article с нормальным текстом (без гифки)
 # ============================================================
 def _esc(s):
     if s is None:
@@ -2942,7 +2973,6 @@ def inline_bot_keyboard(user_id: int = None):
 
 
 async def build_inline_html(deal: dict) -> str:
-    """Собирает финальный HTML-текст карточки сделки (с премиум-эмодзи)."""
     gift_name = deal.get('gift_name') or deal.get('category') or 'NFT'
     profit = deal.get('profit_gram') or 0
     profit_usd = deal.get('profit_usd') or 0
@@ -2994,7 +3024,6 @@ async def build_inline_html(deal: dict) -> str:
 
 
 async def build_inline_plain(deal: dict, lang: str = "ru") -> str:
-    """v1.2.5: сразу готовый HTML — карточка грузится без редактирования."""
     return await build_inline_html(deal)
 
 
@@ -3002,39 +3031,16 @@ async def build_inline_plain(deal: dict, lang: str = "ru") -> str:
 async def inline_query(inline_query):
     uid = inline_query.from_user.id
     query = (inline_query.query or "").strip()
-    admin_uid = await is_admin(uid)
 
     results = []
 
-    # v1.2.5: гифки в подсказках — ТОЛЬКО для админа
-    if admin_uid:
-        try:
-            gif_results = await gif_db.gif_search(query, limit=10)
-        except Exception as e:
-            logger.error(f"gif_search error: {e}")
-            gif_results = []
-        for g in gif_results:
-            if not g.get("mpeg4_file_id"):
-                continue
-            # caption с премиум-эмодзи (сохранён в gif_cache)
-            caption = g.get("caption") or _build_gif_caption(g)
-            results.append(InlineQueryResultCachedMpeg4Gif(
-                id=f"gif_{g['slug']}",
-                mpeg4_file_id=g["mpeg4_file_id"],
-                title=g.get("gift_name") or g["slug"],
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=inline_bot_keyboard(user_id=uid)
-            ))
-
-    # Сделки пользователя — для всех
     conn = await get_db()
     if query.isdigit():
         cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=? ORDER BY id DESC", (int(query), uid))
     else:
         cur = await conn.execute(
-            "SELECT * FROM sales WHERE user_id=? AND (category LIKE ? OR gift_name LIKE ?) ORDER BY id DESC LIMIT 10",
-            (uid, f"%{query}%", f"%{query}%")
+            "SELECT * FROM sales WHERE user_id=? AND (category LIKE ? OR gift_name LIKE ? OR nft_link LIKE ?) ORDER BY id DESC LIMIT 10",
+            (uid, f"%{query}%", f"%{query}%", f"%{query}%")
         )
     rows = await cur.fetchall()
     deals = [dict(row) for row in rows]
@@ -3044,33 +3050,40 @@ async def inline_query(inline_query):
         profit = deal_dict.get('profit_gram') or 0
         profit_usd = deal_dict.get('profit_usd') or 0
 
-        # v1.2.5: если у сделки есть готовая гифка в кэше — отдаём гифку с caption
-        # (доступно только админу, т.к. gif_cache — админский)
-        gif_sent = False
-        if admin_uid:
-            slug_full, _, _ = _extract_slug_from_link(deal_dict.get("nft_link") or "")
-            if slug_full:
-                gif_row = await gif_db.gif_get_ready(slug_full)
-                if gif_row and gif_row.get("mpeg4_file_id"):
-                    caption = await build_inline_html(deal_dict)
-                    if len(caption) > 1024:
-                        caption = caption[:1020] + "…"
-                    results.append(InlineQueryResultCachedMpeg4Gif(
-                        id=f"deal_gif_{deal_dict['id']}",
-                        mpeg4_file_id=gif_row["mpeg4_file_id"],
-                        title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM) 🎬",
-                        caption=caption,
-                        parse_mode="HTML",
-                        reply_markup=inline_bot_keyboard(user_id=uid)
-                    ))
-                    gif_sent = True
+        slug_full, _, _ = _extract_slug_from_link(deal_dict.get("nft_link") or "")
+        gif_row = None
+        gif_status = None
+        if slug_full:
+            gif_row = await gif_db.gif_get(slug_full)
+            gif_status = gif_row.get("status") if gif_row else None
 
-        if not gif_sent:
+        if gif_status == "ready" and gif_row and gif_row.get("mpeg4_file_id"):
+            # v1.2.7: MP4 с caption
+            caption = await build_inline_html(deal_dict)
+            if len(caption) > 1024:
+                caption = caption[:1020] + "…"
+            results.append(InlineQueryResultCachedMpeg4Gif(
+                id=f"deal_gif_{deal_dict['id']}",
+                mpeg4_file_id=gif_row["mpeg4_file_id"],
+                title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM) 🎬",
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=inline_bot_keyboard(user_id=uid)
+            ))
+        else:
+            # v1.2.7: Article со статусом
             plain = await build_inline_plain(deal_dict)
+            if gif_status == "pending":
+                status_icon = "⏳"
+                status_desc = "⏳ Гифка генерируется… (30–120 сек)"
+            else:
+                status_icon = "📄"
+                status_desc = f"Куплено: {deal_dict['buy_amount']} → Продано: {deal_dict['sell_amount']} GRAM"
+
             results.append(InlineQueryResultArticle(
                 id=f"sale_{deal_dict['id']}",
-                title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM / {profit_usd:+.2f}$)",
-                description=f"Куплено: {deal_dict['buy_amount']} → Продано: {deal_dict['sell_amount']} GRAM",
+                title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM / {profit_usd:+.2f}$) {status_icon}",
+                description=status_desc,
                 input_message_content=InputTextMessageContent(message_text=plain, parse_mode="HTML"),
                 reply_markup=inline_bot_keyboard(user_id=uid)
             ))
@@ -3079,12 +3092,19 @@ async def inline_query(inline_query):
         results.append(InlineQueryResultArticle(
             id="no_deals",
             title="Ничего не найдено",
-            description="У вас пока нет сделок",
+            description="Введите номер сделки (#123) или название коллекции",
             input_message_content=InputTextMessageContent(message_text="🔍 Нет сделок"),
             reply_markup=inline_bot_keyboard(user_id=uid)
         ))
 
-    await bot.answer_inline_query(inline_query.id, results, cache_time=1, is_personal=True)
+    await bot.answer_inline_query(
+        inline_query.id,
+        results,
+        cache_time=1,
+        is_personal=True,
+        switch_pm_text="🔍 Искать по номеру (#123) или коллекции",
+        switch_pm_parameter="help"
+    )
 
 
 @dp.chosen_inline_result()
@@ -3092,8 +3112,7 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     if not chosen.inline_message_id:
         return
 
-    # v1.2.5: gif_ и deal_gif_ не редактируем — там уже готовый caption с HTML
-    if chosen.result_id.startswith("gif_") or chosen.result_id.startswith("deal_gif_"):
+    if chosen.result_id.startswith("deal_gif_") or chosen.result_id.startswith("gif_"):
         uid = chosen.from_user.id
         conn = await get_db()
         try:
@@ -3136,7 +3155,6 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     except Exception as e:
         logger.error(f"inlinestats error: {e}")
 
-    # v1.2.5: без sleep, карточка уже готова; редактируем на всякий случай
     for i in range(3):
         try:
             await chosen.bot.edit_message_text(
@@ -3759,7 +3777,7 @@ async def gif_add_start(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "🔗 <b>Введи ссылку на NFT</b>\n\n"
         "Пример: <code>https://t.me/nft/DurovsCap-4074</code>\n\n"
-        "Бот скачает Lottie, отрендерит MP4 и запишет в кэш.\n"
+        "Бот скачает Lottie (или статичную картинку), отрендерит MP4 и запишет в кэш.\n"
         "Это займёт 30–120 секунд.",
         reply_markup=get_cancel_kb(lang)
     )
@@ -3829,7 +3847,6 @@ async def gif_add_process(message: Message, state: FSMContext):
         if not file_id:
             raise RuntimeError("Telegram не вернул file_id")
 
-        # v1.2.5: caption с премиум-эмодзи
         caption = _build_gif_caption(nft_data)
         await gif_db.gif_set_ready(slug_full, file_id, nft_data, caption,
                                     params_json=json.dumps(gif_renderer.DEFAULT_PARAMS))
@@ -3851,7 +3868,7 @@ async def gif_add_process(message: Message, state: FSMContext):
     except Exception as e:
         err_str = str(e)
         if "404" in err_str or "Lottie" in err_str:
-            logger.warning(f"[admin gif] {slug_full}: Lottie недоступен (новая коллекция?)")
+            logger.warning(f"[admin gif] {slug_full}: Lottie/картинка недоступны")
         else:
             logger.exception(f"[admin gif] {slug_full}: {e}")
         await gif_db.gif_set_error(slug_full, err_str[:1000])
@@ -3860,7 +3877,8 @@ async def gif_add_process(message: Message, state: FSMContext):
         except:
             pass
         await status_msg.edit_text(
-            f"❌ <b>Ошибка рендера</b>\n\n<code>{html.escape(err_str[:300])}</code>",
+            f"❌ <b>Ошибка рендера</b>\n\n<code>{html.escape(err_str[:300])}</code>\n\n"
+            f"<i>В инлайне эта сделка покажется текстовой карточкой с премиум-эмодзи.</i>",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"gif_regen_{slug_full}")],
                 [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")],
