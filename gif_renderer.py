@@ -1,6 +1,10 @@
 # ============================================================
-# gif_renderer.py — рендер Lottie → MP4 для Telegram
-# v1.2.5: Lottie 404 (новые коллекции) — не падаем, возвращаем 0.
+# gif_renderer.py — рендер Lottie / static → MP4 для Telegram
+# v1.2.7 (без изменений от v1.2.6):
+#   - Lottie 404 → fallback на статичную картинку Fragment (.webp)
+#   - статичная картинка → MP4 (3 сек, зацикливание)
+#   - работает для новых коллекций (Lucky Locket, Astral Shard и т.д.)
+#   - если и картинка 404 — RuntimeError, в инлайне текстовая карточка
 # ============================================================
 import asyncio
 import json
@@ -25,9 +29,11 @@ DEFAULT_PARAMS = {
     "crf": 23,
     "preset": "veryfast",
     "pix_fmt": "yuv420p",
+    "static_duration": 3,
 }
 
 LOTTIE_URL = "https://nft.fragment.com/gift/{slug}.lottie.json"
+IMAGE_URL = "https://nft.fragment.com/gift/{slug}.webp"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
 
 _browser = None
@@ -98,19 +104,31 @@ def check_ffmpeg():
 
 
 async def download_lottie(slug_full: str, dest: Path):
-    """
-    v1.2.5: при 404 (новая коллекция) возвращает 0.
-    """
+    """Lottie есть только у старых коллекций. При 404 — возвращает 0."""
     url = LOTTIE_URL.format(slug=slug_full)
     logger.info(f"[lottie] → {url}")
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": UA}) as s:
         async with s.get(url) as r:
             if r.status == 404:
-                logger.warning(f"[lottie] 404 для {slug_full} — Lottie нет (новая коллекция?)")
+                logger.warning(f"[lottie] 404 для {slug_full} — новая коллекция")
                 return 0
             if r.status != 200:
-                raise ValueError(f"Lottie HTTP {r.status} для {slug_full} (url={url})")
+                raise ValueError(f"Lottie HTTP {r.status} для {slug_full}")
+            data = await r.read()
+    dest.write_bytes(data)
+    return len(data)
+
+
+async def download_fragment_image(slug_full: str, dest: Path):
+    """Статичное превью NFT с Fragment (.webp). Работает для всех."""
+    url = IMAGE_URL.format(slug=slug_full)
+    logger.info(f"[image] → {url}")
+    timeout = aiohttp.ClientTimeout(total=30)
+    async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": UA}) as s:
+        async with s.get(url) as r:
+            if r.status != 200:
+                raise ValueError(f"Image HTTP {r.status} для {slug_full}")
             data = await r.read()
     dest.write_bytes(data)
     return len(data)
@@ -158,6 +176,40 @@ def _build_html(bg_data: dict, anim_data: dict, params: dict) -> str:
 </html>"""
 
 
+async def render_static_mp4(webp_path: Path, out_mp4: Path, params: dict):
+    """Статичная картинка → MP4 (3 сек, зацикливание)."""
+    ff = check_ffmpeg()
+    duration = int(params.get("static_duration", 3))
+    cw = params["card_w"]
+    ch = params["card_h"]
+
+    cmd = [
+        ff, "-y",
+        "-loop", "1",
+        "-i", str(webp_path),
+        "-t", str(duration),
+        "-vf", f"scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=#1a1a1a,format=yuv420p",
+        "-r", str(params["fps"]),
+        "-c:v", "libx264",
+        "-profile:v", "main",
+        "-level", "4.0",
+        "-preset", params["preset"],
+        "-crf", str(params["crf"]),
+        "-pix_fmt", params["pix_fmt"],
+        "-threads", "0",
+        "-movflags", "+faststart",
+        str(out_mp4),
+    ]
+    logger.info(f"[static-render] ffmpeg → {out_mp4.name}")
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg static error: {res.stderr[-500:]}")
+
+    size_mp4 = out_mp4.stat().st_size
+    logger.info(f"[static-render] MP4 {size_mp4} байт")
+    return size_mp4
+
+
 async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path):
     browser = await init_browser()
     ff = check_ffmpeg()
@@ -165,7 +217,7 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
     lottie_path = work_dir / "anim.json"
     size = await download_lottie(slug_full, lottie_path)
     if size == 0:
-        raise RuntimeError(f"Lottie 404 для {slug_full} — гифка недоступна для этой коллекции")
+        raise RuntimeError(f"Lottie 404 для {slug_full}")
     logger.info(f"[render] {slug_full}: Lottie {size} байт")
 
     data = json.loads(lottie_path.read_text(encoding="utf-8"))
@@ -238,8 +290,25 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
 
 
 async def render_to_tempfile(slug_full: str, params: dict = None):
+    """
+    v1.2.7: 
+      1. Lottie → анимированная гифка
+      2. .webp с Fragment → статичная MP4 (3 сек)
+      3. Если .webp 404 → RuntimeError → в инлайне текстовая карточка
+    """
     params = {**DEFAULT_PARAMS, **(params or {})}
     work_dir = Path(tempfile.mkdtemp(prefix=f"gif_{slug_full}_"))
     out_mp4 = work_dir / f"{slug_full}.mp4"
-    await render_mp4(slug_full, out_mp4, params, work_dir)
+
+    try:
+        await render_mp4(slug_full, out_mp4, params, work_dir)
+        return out_mp4, work_dir
+    except RuntimeError as e:
+        if "Lottie 404" not in str(e) and "Lottie" not in str(e):
+            raise
+        logger.info(f"[fallback] {slug_full}: Lottie нет → статичная картинка")
+
+    webp_path = work_dir / "preview.webp"
+    await download_fragment_image(slug_full, webp_path)
+    await render_static_mp4(webp_path, out_mp4, params)
     return out_mp4, work_dir
