@@ -1,7 +1,6 @@
 # ============================================================
 # gif_renderer.py — рендер Lottie → MP4 для Telegram
-# v1.2.4: Lottie URL теперь принимает ПОЛНЫЙ slug (durovscap-4074).
-#         Флаги pyppeteer — 3, как в рабочем боте v54.1.
+# v1.2.5: Lottie 404 (новые коллекции) — не падаем, возвращаем 0.
 # ============================================================
 import asyncio
 import json
@@ -35,7 +34,6 @@ _browser = None
 
 
 async def init_browser():
-    """Запускает headless Chromium один раз. Флаги — как в рабочем боте."""
     global _browser
     if _browser is not None:
         return _browser
@@ -101,14 +99,16 @@ def check_ffmpeg():
 
 async def download_lottie(slug_full: str, dest: Path):
     """
-    v1.2.4: slug_full = "durovscap-4074" (полный, с номером).
-    URL: https://nft.fragment.com/gift/durovscap-4074.lottie.json
+    v1.2.5: при 404 (новая коллекция) возвращает 0.
     """
     url = LOTTIE_URL.format(slug=slug_full)
     logger.info(f"[lottie] → {url}")
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": UA}) as s:
         async with s.get(url) as r:
+            if r.status == 404:
+                logger.warning(f"[lottie] 404 для {slug_full} — Lottie нет (новая коллекция?)")
+                return 0
             if r.status != 200:
                 raise ValueError(f"Lottie HTTP {r.status} для {slug_full} (url={url})")
             data = await r.read()
@@ -164,6 +164,8 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
 
     lottie_path = work_dir / "anim.json"
     size = await download_lottie(slug_full, lottie_path)
+    if size == 0:
+        raise RuntimeError(f"Lottie 404 для {slug_full} — гифка недоступна для этой коллекции")
     logger.info(f"[render] {slug_full}: Lottie {size} байт")
 
     data = json.loads(lottie_path.read_text(encoding="utf-8"))
@@ -236,9 +238,6 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
 
 
 async def render_to_tempfile(slug_full: str, params: dict = None):
-    """
-    v1.2.4: принимает ПОЛНЫЙ slug ("durovscap-4074").
-    """
     params = {**DEFAULT_PARAMS, **(params or {})}
     work_dir = Path(tempfile.mkdtemp(prefix=f"gif_{slug_full}_"))
     out_mp4 = work_dir / f"{slug_full}.mp4"
