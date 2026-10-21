@@ -8,13 +8,17 @@ FROM python:3.11-slim
 # chromium          — headless-браузер для pyppeteer (рендер Lottie)
 # ffmpeg            — склейка PNG-кадров в MP4
 # fonts-liberation  — шрифты для корректного рендера текста
-# libnss3, libatk... — библиотеки, без которых chromium не стартует
+# libnss3, libnspr4, libatk..., libxtst6, libxss1, libx11-xcb1,
+# libxcursor1, libxi6, libglib2.0-0 — библиотеки, без которых
+# chromium не стартует в headless-режиме (ошибка
+# "Browser closed unexpectedly").
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     chromium \
     chromium-driver \
     fonts-liberation \
     libnss3 \
+    libnspr4 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
     libcups2 \
@@ -28,6 +32,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libpango-1.0-0 \
     libcairo2 \
+    libxtst6 \
+    libxss1 \
+    libx11-xcb1 \
+    libxcursor1 \
+    libxi6 \
+    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
