@@ -1,7 +1,9 @@
 # ============================================================
-# bot.py — Gram2Profit v1.2
+# bot.py — Gram2Profit v1.2.1
 # Премиум-эмодзи, два курса GRAM, парсинг 3 источников,
 # таймеры с pending_id, гифки в инлайне, админ-панель гиф.
+# v1.2.1: убран вопрос про дни при сохранении отложки,
+#         добавлена очистка старых таймеров.
 # ============================================================
 
 # ===== АВТОУСТАНОВКА БИБЛИОТЕК =====
@@ -65,7 +67,7 @@ import gif_db
 import gif_renderer
 
 # ---------- КОНФИГ ----------
-BOT_TOKEN = "ТОКЕН"
+BOT_TOKEN = "ТОК"
 ADMIN_IDS = [1012040843]
 DB_PATH = "sales.db"
 BOT_URL = "https://t.me/Stars2ProfitBot"
@@ -76,7 +78,7 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # ВЕРСИЯ (видит только админ в /admin и в логах при старте)
 # ============================================================
-VERSION = "v1.2 (gif-inline, timers-pending, show-usd, admin-gif-panel)"
+VERSION = "v1.2.1 (gif-inline, timers-pending, show-usd, admin-gif-panel, no-mint-question)"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
@@ -142,7 +144,7 @@ class PendingBuy(StatesGroup):
     waiting_for_category = State()
     waiting_for_nft_link = State()
     waiting_for_royalty = State()
-    waiting_for_timer_days = State()  # v1.2
+    # v1.2.1: waiting_for_timer_days УБРАН (вопрос про дни больше не задаётся)
 
 class CompletePending(StatesGroup):
     waiting_for_select = State()
@@ -901,9 +903,7 @@ async def get_gift_from_tme(nft_link: str):
 
                 result = _parse_tme_description(description)
 
-                # ============================================================
                 # v1.2: ищем <tg-emoji emoji-id="..."> в HTML t.me
-                # ============================================================
                 emoji_patterns = {
                     "model_emoji_id":    r'Model[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
                     "backdrop_emoji_id": r'Backdrop[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
@@ -1048,9 +1048,6 @@ async def parse_nft_link(nft_link: str):
     if source_data.get("gift_name"):
         result["gift_name"] = source_data["gift_name"]
 
-    # ============================================================
-    # v1.2: сначала emoji_id из t.me (если есть), потом changes.tg
-    # ============================================================
     for name_key, section, out_prefix in (
         ("model_name",    "models",    "model"),
         ("backdrop_name", "backdrops", "backdrop"),
@@ -1219,6 +1216,7 @@ def format_gift_attributes(data: dict) -> str:
     return "\n".join(lines)
 
 
+
 # ---------- КЛАВИАТУРЫ ----------
 def get_main_kb(lang="ru"):
     msgs = MESSAGES[lang]
@@ -1353,9 +1351,7 @@ async def process_nft_link(message: Message, state: FSMContext):
         else:
             await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n<i>Характеристики не найдены</i>", reply_markup=get_cancel_kb(lang))
 
-    # ============================================================
     # v1.2: фоновый рендер гифки (юзер не ждёт)
-    # ============================================================
     if nft_data:
         slug_full, slug_short, number = _extract_slug_from_link(link)
         if slug_full and number is not None:
@@ -1529,6 +1525,12 @@ async def process_pending_nft_link(message: Message, state: FSMContext):
     if nft_data:
         await state.update_data(**nft_data)
 
+    # v1.2: фоновый рендер гифки
+    if nft_data:
+        slug_full, slug_short, number = _extract_slug_from_link(link)
+        if slug_full and number is not None:
+            asyncio.create_task(generate_gif_background(slug_full, slug_short, number, link, nft_data, message.from_user.id))
+
     royalty = await get_user_royalty(message.from_user.id)
     await state.set_state(PendingBuy.waiting_for_royalty)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1587,70 +1589,16 @@ async def save_pending(message: Message, state: FSMContext, royalty: float, user
     await log_action(user_id, "", "add_pending", f"{data['category']}, {data['buy_amount']} GRAM, id={pending_id}")
 
     # ============================================================
-    # v1.2: спрашиваем, через сколько дней напомнить о минте
+    # v1.2.1: НЕ спрашиваем про дни. Отложка сохраняется сразу.
+    # Таймеры — только через «⏰ Таймеры» (отдельная вкладка).
     # ============================================================
-    await state.set_state(PendingBuy.waiting_for_timer_days)
+    await state.clear()
     msgs = MESSAGES[lang]
     await message.answer(
         f"{EMOJI_DOLLAR} Курс покупки зафиксирован: <b>${gram_price_buy:.4f}</b>\n\n"
-        f"{msgs['pending_saved'].format(category=data['category'], amount=data['buy_amount'])}\n\n"
-        f"⏰ Через сколько дней напомнить о минте?\n"
-        f"Введите число дней (например, <code>7</code>) или <code>0</code>, чтобы не напоминать.",
-        reply_markup=get_cancel_kb(lang)
+        f"{msgs['pending_saved'].format(category=data['category'], amount=data['buy_amount'])}",
+        reply_markup=get_main_kb(lang)
     )
-
-
-# ============================================================
-# v1.2: обработка "через сколько дней напомнить о минте"
-# ============================================================
-@dp.message(PendingBuy.waiting_for_timer_days)
-async def process_pending_timer_days(message: Message, state: FSMContext):
-    lang = await get_user_lang(message.from_user.id)
-    try:
-        days = int(message.text.strip())
-        if days < 0:
-            raise ValueError
-
-        data = await state.get_data()
-        pending_id = data.get("pending_id")
-        nft_link = data.get("nft_link")
-        buy_amount = data.get("buy_amount")
-        category = data.get("category", "—")
-
-        conn = await get_db()
-
-        if days > 0 and pending_id:
-            event_time = time.time() + days * 86400
-            await conn.execute(
-                "INSERT INTO timers (user_id, event_type, nft_link, stars_amount, event_time, description, pending_id) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (message.from_user.id, "mint", nft_link, 0, event_time, category, pending_id)
-            )
-            await conn.commit()
-
-        await state.clear()
-
-        if days > 0:
-            text = (
-                f"✅ <b>Отложенная покупка сохранена!</b>\n"
-                f"📁 {category}\n"
-                f"💎 {buy_amount} GRAM\n\n"
-                f"⏰ Напоминание о минте установлено: через <b>{days} дн.</b>"
-            )
-        else:
-            text = (
-                f"✅ <b>Отложенная покупка сохранена!</b>\n"
-                f"📁 {category}\n"
-                f"💎 {buy_amount} GRAM\n\n"
-                f"🔕 Без напоминания."
-            )
-
-        await message.answer(text, reply_markup=get_main_kb(lang))
-    except ValueError:
-        await message.answer(
-            "❌ Введите целое число дней (0 — без напоминания).",
-            reply_markup=get_cancel_kb(lang)
-        )
 
 
 # ---------- ЗАВЕРШЕНИЕ СДЕЛКИ ----------
@@ -1829,9 +1777,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
          nft_data.get("collection_emoji_id"))
     )
     await conn.execute("DELETE FROM pending_sales WHERE id=?", (pending_id,))
-    # ============================================================
-    # v1.2: удаляем таймер, привязанный к этой отложке
-    # ============================================================
+    # v1.2: удаляем таймер, привязанный к этой отложке (если был)
     await conn.execute("DELETE FROM timers WHERE pending_id=?", (pending_id,))
     await conn.commit()
     await add_user_collection(user_id, row["category"])
@@ -1857,9 +1803,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
     )
     if attrs:
         header = f"{header}\n{attrs}"
-    # ============================================================
-    # v1.2: сообщаем, что таймер удалён
-    # ============================================================
+    # v1.2: сообщаем, что таймер удалён (если он был)
     text += "\n\n⏰ Напоминание о минте удалено."
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
@@ -1893,9 +1837,7 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
         return
     conn = await get_db()
     await conn.execute("DELETE FROM pending_sales WHERE id=? AND user_id=?", (pending_id, callback.from_user.id))
-    # ============================================================
     # v1.2: удаляем таймер, привязанный к этой отложке
-    # ============================================================
     await conn.execute("DELETE FROM timers WHERE pending_id=?", (pending_id,))
     await conn.commit()
     await state.clear()
@@ -2110,6 +2052,7 @@ async def confirm_delete(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(MESSAGES[lang]["deleted"])
     except:
         await callback.message.answer(MESSAGES[lang]["deleted"])
+
 
 
 # ---------- ИСТОРИЯ ----------
@@ -2979,6 +2922,7 @@ async def goal_later(callback: CallbackQuery):
         pass
 
 
+
 # ============================================================
 # ИНЛАЙН-РЕЖИМ
 # ============================================================
@@ -3062,7 +3006,11 @@ async def inline_query(inline_query):
     results = []
 
     # v1.2: сначала готовые гифки из gif_cache
-    gif_results = await gif_db.gif_search(query, limit=10)
+    try:
+        gif_results = await gif_db.gif_search(query, limit=10)
+    except Exception as e:
+        logger.error(f"gif_search error: {e}")
+        gif_results = []
     for g in gif_results:
         if not g.get("mpeg4_file_id"):
             continue
@@ -3122,7 +3070,6 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     # v1.2: гифки не редактируем (уже с caption), только статистика
     if chosen.result_id.startswith("gif_"):
         uid = chosen.from_user.id
-        slug = chosen.result_id.replace("gif_", "")
         conn = await get_db()
         try:
             await conn.execute(
@@ -3226,6 +3173,7 @@ async def show_admin_panel(message: Message):
         [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
         [InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_admin")],
         [InlineKeyboardButton(text="📋 Список админов", callback_data="admin_list_admins")],
+        [InlineKeyboardButton(text="🧹 Очистить старые таймеры", callback_data="admin_clear_old_timers")],
         [InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin_backup")],
         [InlineKeyboardButton(text="⬅️ Закрыть", callback_data="close_admin")]
     ])
@@ -3692,6 +3640,26 @@ async def list_admins(callback: CallbackQuery):
     cur = await conn.execute("SELECT user_id FROM admins")
     ids = [str(row[0]) async for row in cur]
     await callback.message.answer("👑 <b>Администраторы:</b>\n" + "\n".join(ids))
+
+
+# ============================================================
+# v1.2.1: очистка старых таймеров (pending_id = NULL)
+# ============================================================
+@dp.callback_query(F.data == "admin_clear_old_timers")
+async def admin_clear_old_timers(callback: CallbackQuery):
+    await callback.answer()
+    if not await is_admin(callback.from_user.id):
+        return
+    conn = await get_db()
+    cur = await conn.execute("SELECT COUNT(*) FROM timers WHERE pending_id IS NULL AND notified=0")
+    count = (await cur.fetchone())[0]
+    if count == 0:
+        await callback.message.answer("✅ Старых таймеров нет.")
+        return
+    await conn.execute("DELETE FROM timers WHERE pending_id IS NULL AND notified=0")
+    await conn.commit()
+    await log_action(callback.from_user.id, callback.from_user.username or "", "clear_old_timers", f"deleted={count}")
+    await callback.message.answer(f"🧹 Удалено старых таймеров: <b>{count}</b>")
 
 
 @dp.callback_query(F.data == "admin_backup")
@@ -4439,4 +4407,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-        
