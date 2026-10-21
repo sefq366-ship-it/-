@@ -1,9 +1,9 @@
 # ============================================================
-# bot.py — Gram2Profit v1.2.1
+# bot.py — Gram2Profit v1.2.2
 # Премиум-эмодзи, два курса GRAM, парсинг 3 источников,
 # таймеры с pending_id, гифки в инлайне, админ-панель гиф.
-# v1.2.1: убран вопрос про дни при сохранении отложки,
-#         добавлена очистка старых таймеров.
+# v1.2.2: все callback.answer() обёрнуты в try/except
+#         (фикс "query is too old").
 # ============================================================
 
 # ===== АВТОУСТАНОВКА БИБЛИОТЕК =====
@@ -60,9 +60,6 @@ from aiogram.types import (
 
 from messages import MESSAGES
 
-# ============================================================
-# v1.2: импорты для гифок
-# ============================================================
 import gif_db
 import gif_renderer
 
@@ -75,10 +72,7 @@ BOT_URL = "https://t.me/Stars2ProfitBot"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# ВЕРСИЯ (видит только админ в /admin и в логах при старте)
-# ============================================================
-VERSION = "v1.2.1 (gif-inline, timers-pending, show-usd, admin-gif-panel, no-mint-question)"
+VERSION = "v1.2.2 (gif-inline, timers-pending, show-usd, admin-gif-panel, no-mint-question, cb-safe)"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
@@ -96,6 +90,16 @@ EMOJI_LINK     = '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji>'
 EMOJI_MODEL_FALLBACK    = "🎨"
 EMOJI_BACKDROP_FALLBACK = "⚫"
 EMOJI_SYMBOL_FALLBACK   = "🌸"
+
+
+# ============================================================
+# v1.2.2: безопасный ответ на callback
+# ============================================================
+async def safe_answer(callback: CallbackQuery):
+    try:
+        await callback.answer()
+    except Exception:
+        pass
 
 
 # ---------- ТРОТТЛИНГ ----------
@@ -144,7 +148,6 @@ class PendingBuy(StatesGroup):
     waiting_for_category = State()
     waiting_for_nft_link = State()
     waiting_for_royalty = State()
-    # v1.2.1: waiting_for_timer_days УБРАН (вопрос про дни больше не задаётся)
 
 class CompletePending(StatesGroup):
     waiting_for_select = State()
@@ -199,9 +202,6 @@ class TimerAdd(StatesGroup):
     waiting_for_nft_link = State()
     waiting_for_days = State()
 
-# ============================================================
-# v1.2: состояния для админ-панели гифок
-# ============================================================
 class AdminGifAdd(StatesGroup):
     waiting_for_link = State()
 
@@ -226,9 +226,6 @@ async def set_user_lang(user_id, lang):
     await conn.commit()
 
 
-# ============================================================
-# v1.2: настройка "показывать в USD"
-# ============================================================
 async def get_user_show_usd(user_id):
     conn = await get_db()
     cur = await conn.execute("SELECT show_usd FROM user_settings WHERE user_id=?", (user_id,))
@@ -421,7 +418,6 @@ async def init_db():
         );
     ''')
 
-    # --- Миграции для старых БД ---
     for col, typ in [
         ('nft_link', 'TEXT'),
         ('gram_price', 'REAL DEFAULT 0'),
@@ -473,9 +469,6 @@ async def init_db():
     except:
         pass
 
-    # ============================================================
-    # МИГРАЦИИ v1.2: show_usd, pending_id в timers, gif_cache
-    # ============================================================
     try:
         await conn.execute("ALTER TABLE user_settings ADD COLUMN show_usd INTEGER DEFAULT 1")
     except:
@@ -752,7 +745,7 @@ def get_next_level_points(points: int) -> int:
 
 
 # ============================================================
-# ПАРСИНГ NFT (Fragment → t.me → changes.tg для эмодзи)
+# ПАРСИНГ NFT
 # ============================================================
 def parse_gift_info_from_link(nft_link: str):
     if not nft_link:
@@ -903,7 +896,6 @@ async def get_gift_from_tme(nft_link: str):
 
                 result = _parse_tme_description(description)
 
-                # v1.2: ищем <tg-emoji emoji-id="..."> в HTML t.me
                 emoji_patterns = {
                     "model_emoji_id":    r'Model[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
                     "backdrop_emoji_id": r'Backdrop[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
@@ -1351,7 +1343,6 @@ async def process_nft_link(message: Message, state: FSMContext):
         else:
             await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n<i>Характеристики не найдены</i>", reply_markup=get_cancel_kb(lang))
 
-    # v1.2: фоновый рендер гифки (юзер не ждёт)
     if nft_data:
         slug_full, slug_short, number = _extract_slug_from_link(link)
         if slug_full and number is not None:
@@ -1391,7 +1382,7 @@ async def process_sell_amount(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("royalty_"))
 async def process_royalty_choice(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     val = callback.data.replace("royalty_", "")
     if val == "custom":
@@ -1525,7 +1516,6 @@ async def process_pending_nft_link(message: Message, state: FSMContext):
     if nft_data:
         await state.update_data(**nft_data)
 
-    # v1.2: фоновый рендер гифки
     if nft_data:
         slug_full, slug_short, number = _extract_slug_from_link(link)
         if slug_full and number is not None:
@@ -1544,7 +1534,7 @@ async def process_pending_nft_link(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("pending_royalty_"))
 async def process_pending_royalty(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     val = callback.data.replace("pending_royalty_", "")
     if val == "custom":
@@ -1588,10 +1578,6 @@ async def save_pending(message: Message, state: FSMContext, royalty: float, user
 
     await log_action(user_id, "", "add_pending", f"{data['category']}, {data['buy_amount']} GRAM, id={pending_id}")
 
-    # ============================================================
-    # v1.2.1: НЕ спрашиваем про дни. Отложка сохраняется сразу.
-    # Таймеры — только через «⏰ Таймеры» (отдельная вкладка).
-    # ============================================================
     await state.clear()
     msgs = MESSAGES[lang]
     await message.answer(
@@ -1638,7 +1624,7 @@ async def complete_start(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.regexp(r"^complete_\d+$"))
 async def process_complete(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     pending_id = int(callback.data.split("_")[1])
     conn = await get_db()
@@ -1666,7 +1652,7 @@ async def process_complete(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_complete")
 async def confirm_complete(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(CompletePending.waiting_for_sell_amount)
     await callback.message.answer(MESSAGES[lang]["enter_sell_amount"], reply_markup=get_cancel_kb(lang))
@@ -1698,7 +1684,7 @@ async def process_complete_sell_amount(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("complete_royalty_"))
 async def process_complete_royalty_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     val = callback.data.replace("complete_royalty_", "")
     if val == "custom":
@@ -1777,7 +1763,6 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
          nft_data.get("collection_emoji_id"))
     )
     await conn.execute("DELETE FROM pending_sales WHERE id=?", (pending_id,))
-    # v1.2: удаляем таймер, привязанный к этой отложке (если был)
     await conn.execute("DELETE FROM timers WHERE pending_id=?", (pending_id,))
     await conn.commit()
     await add_user_collection(user_id, row["category"])
@@ -1803,14 +1788,13 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
     )
     if attrs:
         header = f"{header}\n{attrs}"
-    # v1.2: сообщаем, что таймер удалён (если он был)
     text += "\n\n⏰ Напоминание о минте удалено."
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
 
 @dp.callback_query(F.data.startswith("delete_pending_"))
 async def delete_pending_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     pending_id = int(callback.data.split("_")[-1])
     await state.update_data(delete_pending_id=pending_id)
@@ -1824,7 +1808,7 @@ async def delete_pending_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_delete_pending")
 async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     data = await state.get_data()
     pending_id = data.get("delete_pending_id")
     lang = await get_user_lang(callback.from_user.id)
@@ -1837,7 +1821,6 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
         return
     conn = await get_db()
     await conn.execute("DELETE FROM pending_sales WHERE id=? AND user_id=?", (pending_id, callback.from_user.id))
-    # v1.2: удаляем таймер, привязанный к этой отложке
     await conn.execute("DELETE FROM timers WHERE pending_id=?", (pending_id,))
     await conn.commit()
     await state.clear()
@@ -1852,7 +1835,7 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
 # ---------- РЕДАКТИРОВАНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
 async def edit_deal_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     deal_id = int(callback.data.split("_")[1])
     conn = await get_db()
@@ -1934,7 +1917,7 @@ async def process_edit_sell_amount(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("edit_royalty_"))
 async def process_edit_royalty_choice(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     val = callback.data.replace("edit_royalty_", "")
     if val == "custom":
@@ -2018,7 +2001,7 @@ async def finalize_edit(message: Message, state: FSMContext, royalty: float, use
 # ---------- УДАЛЕНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^delete_\d+$"))
 async def delete_deal_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     deal_id = int(callback.data.split("_")[1])
     await state.update_data(delete_deal_id=deal_id)
@@ -2032,7 +2015,7 @@ async def delete_deal_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "confirm_delete")
 async def confirm_delete(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     data = await state.get_data()
     deal_id = data.get("delete_deal_id")
     lang = await get_user_lang(callback.from_user.id)
@@ -2130,7 +2113,7 @@ async def show_history_page(message: Message, user_id: int, page: int):
 
 @dp.callback_query(F.data.startswith("hist_"))
 async def history_pagination(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     parts = callback.data.split("_")
     direction = parts[1]
     current_page = int(parts[2])
@@ -2200,7 +2183,7 @@ async def show_stats_dashboard(message: Message, user_id: int):
 
 @dp.callback_query(F.data == "stats_collections")
 async def stats_collections(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     uid = callback.from_user.id
     conn = await get_db()
@@ -2221,7 +2204,7 @@ async def stats_collections(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stats_months")
 async def stats_months(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     uid = callback.from_user.id
     conn = await get_db()
@@ -2252,7 +2235,7 @@ async def stats_months(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stats_top")
 async def stats_top(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     uid = callback.from_user.id
     conn = await get_db()
@@ -2277,7 +2260,7 @@ async def stats_top(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stats_cumulative")
 async def stats_cumulative(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     uid = callback.from_user.id
     conn = await get_db()
@@ -2305,7 +2288,7 @@ async def stats_cumulative(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stats_chart")
 async def stats_chart(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     uid = callback.from_user.id
     conn = await get_db()
@@ -2329,7 +2312,7 @@ async def stats_chart(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "stats_back")
 async def stats_back(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     try:
         await callback.message.delete()
     except:
@@ -2339,7 +2322,7 @@ async def stats_back(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "close_stats")
 async def close_stats(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     try:
         await callback.message.delete()
     except:
@@ -2363,7 +2346,7 @@ async def calc_start(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_(["calc_stars_to_gram", "calc_gram_to_stars"]))
 async def calc_direction(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     direction = callback.data.replace("calc_", "")
     await state.update_data(calc_dir=direction)
@@ -2440,14 +2423,14 @@ async def donate_menu(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "donate_wallet")
 async def donate_wallet(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await callback.message.answer(MESSAGES[lang]["donate_text"])
 
 
 @dp.callback_query(F.data == "donate_stars")
 async def donate_stars_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(DonateStars.waiting_for_amount)
     await callback.message.answer(MESSAGES[lang]["donate_enter_amount"], reply_markup=get_cancel_kb(lang))
@@ -2512,7 +2495,7 @@ async def successful_payment(message: Message):
 
 @dp.callback_query(F.data == "donate_top")
 async def donate_top(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     conn = await get_db()
     cur = await conn.execute("""
@@ -2574,7 +2557,7 @@ async def timers_menu(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "timer_mint")
 async def timer_mint_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.update_data(event_type="mint")
     await state.set_state(TimerAdd.waiting_for_nft_link)
@@ -2583,7 +2566,7 @@ async def timer_mint_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "timer_unlock")
 async def timer_unlock_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.update_data(event_type="unlock")
     await state.set_state(TimerAdd.waiting_for_days)
@@ -2592,7 +2575,7 @@ async def timer_unlock_start(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "timer_relist")
 async def timer_relist_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.update_data(event_type="relist")
     await state.set_state(TimerAdd.waiting_for_nft_link)
@@ -2660,7 +2643,7 @@ async def reports_menu(message: Message, state: FSMContext = None):
 
 @dp.callback_query(F.data.in_(["toggle_weekly", "toggle_monthly", "toggle_yearly"]))
 async def toggle_report(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     report_type = callback.data.replace("toggle_", "")
     conn = await get_db()
     cur = await conn.execute(f"SELECT {report_type} FROM user_earnings_reports WHERE user_id=?", (callback.from_user.id,))
@@ -2710,12 +2693,9 @@ async def settings(message: Message):
     await message.answer(text, reply_markup=kb)
 
 
-# ============================================================
-# v1.2: переключатель "показывать в USD"
-# ============================================================
 @dp.callback_query(F.data == "toggle_show_usd")
 async def toggle_show_usd_cb(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     uid = callback.from_user.id
     current = await get_user_show_usd(uid)
     await set_user_show_usd(uid, not current)
@@ -2729,7 +2709,7 @@ async def toggle_show_usd_cb(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "close_settings")
 async def close_settings(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     try:
         await callback.message.delete()
     except:
@@ -2738,13 +2718,13 @@ async def close_settings(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "open_reports")
 async def open_reports(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     await reports_menu(callback.message, state)
 
 
 @dp.callback_query(F.data == "set_royalty")
 async def set_royalty_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(SetRoyalty.waiting_for_royalty)
     await callback.message.answer(MESSAGES[lang]["enter_royalty"], reply_markup=get_cancel_kb(lang))
@@ -2767,7 +2747,7 @@ async def process_set_royalty(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "set_goal")
 async def set_goal_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(SetGoal.waiting_for_goal)
     await callback.message.answer(MESSAGES[lang]["enter_goal"], reply_markup=get_cancel_kb(lang))
@@ -2792,7 +2772,7 @@ async def process_set_goal(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "set_star_rate")
 async def set_star_rate_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(SetStarRate.waiting_for_rate)
     await callback.message.answer(MESSAGES[lang]["enter_star_rate"], reply_markup=get_cancel_kb(lang))
@@ -2813,7 +2793,7 @@ async def process_set_star_rate(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "toggle_change_alert")
 async def toggle_change_alert(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     enabled, percent, _ = await get_user_change_alert(callback.from_user.id)
     if enabled:
@@ -2839,7 +2819,7 @@ async def process_change_percent(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "alert_start")
 async def alert_start_cb(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     lang = await get_user_lang(callback.from_user.id)
     await state.set_state(AlertStates.waiting_for_price)
     await callback.message.answer(MESSAGES[lang]["enter_alert_price"], reply_markup=get_cancel_kb(lang))
@@ -2904,7 +2884,7 @@ async def referrals_menu(message: Message, state: FSMContext):
 # ---------- ОТМЕНА И ПОЗЖЕ ----------
 @dp.callback_query(F.data == "cancel_deal")
 async def cancel_deal(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     await state.clear()
     lang = await get_user_lang(callback.from_user.id)
     try:
@@ -2915,7 +2895,7 @@ async def cancel_deal(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "goal_later")
 async def goal_later(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     try:
         await callback.message.delete()
     except:
@@ -3005,7 +2985,6 @@ async def inline_query(inline_query):
 
     results = []
 
-    # v1.2: сначала готовые гифки из gif_cache
     try:
         gif_results = await gif_db.gif_search(query, limit=10)
     except Exception as e:
@@ -3024,7 +3003,6 @@ async def inline_query(inline_query):
             reply_markup=inline_bot_keyboard(user_id=uid)
         ))
 
-    # сделки пользователя (как раньше)
     conn = await get_db()
     if query.isdigit():
         cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=? ORDER BY id DESC", (int(query), uid))
@@ -3067,7 +3045,6 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     if not chosen.inline_message_id:
         return
 
-    # v1.2: гифки не редактируем (уже с caption), только статистика
     if chosen.result_id.startswith("gif_"):
         uid = chosen.from_user.id
         conn = await get_db()
@@ -3182,7 +3159,7 @@ async def show_admin_panel(message: Message):
 
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel_back(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     try:
@@ -3194,7 +3171,7 @@ async def admin_panel_back(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "close_admin")
 async def close_admin(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     try:
         await callback.message.delete()
     except:
@@ -3203,7 +3180,7 @@ async def close_admin(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3221,7 +3198,7 @@ async def admin_users(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_ext_stats")
 async def admin_ext_stats(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await show_extended_stats(callback.message)
@@ -3312,7 +3289,7 @@ async def show_extended_stats(message: Message):
 
 @dp.callback_query(F.data == "adm_stats_days")
 async def adm_stats_days(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3329,7 +3306,7 @@ async def adm_stats_days(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "adm_stats_hours")
 async def adm_stats_hours(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3346,7 +3323,7 @@ async def adm_stats_hours(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_inline_stats")
 async def admin_inline_stats(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3395,7 +3372,7 @@ async def admin_inline_stats(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_logs")
 async def admin_logs(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3423,7 +3400,7 @@ async def admin_logs(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "logs_clear")
 async def logs_clear(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3434,7 +3411,7 @@ async def logs_clear(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_errors")
 async def admin_errors(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await show_errors_menu(callback.message)
@@ -3480,7 +3457,7 @@ async def show_errors_menu(message: Message):
 
 @dp.callback_query(F.data == "errors_copy")
 async def errors_copy(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3505,7 +3482,7 @@ async def errors_copy(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "errors_download")
 async def errors_download(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3544,7 +3521,7 @@ async def errors_download(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "errors_clear")
 async def errors_clear(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3555,7 +3532,7 @@ async def errors_clear(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(BroadcastState.waiting_for_message)
@@ -3585,7 +3562,7 @@ async def do_broadcast(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "admin_add_admin")
 async def add_admin_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AddAdminState.waiting_for_id)
@@ -3609,7 +3586,7 @@ async def add_admin_finish(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "admin_remove_admin")
 async def remove_admin_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(RemoveAdminState.waiting_for_id)
@@ -3633,7 +3610,7 @@ async def remove_admin_finish(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data == "admin_list_admins")
 async def list_admins(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3642,12 +3619,9 @@ async def list_admins(callback: CallbackQuery):
     await callback.message.answer("👑 <b>Администраторы:</b>\n" + "\n".join(ids))
 
 
-# ============================================================
-# v1.2.1: очистка старых таймеров (pending_id = NULL)
-# ============================================================
 @dp.callback_query(F.data == "admin_clear_old_timers")
 async def admin_clear_old_timers(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     conn = await get_db()
@@ -3664,7 +3638,7 @@ async def admin_clear_old_timers(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "admin_backup")
 async def admin_backup(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     try:
@@ -3705,12 +3679,12 @@ async def create_and_send_backup(admin_id: int):
 
 
 # ============================================================
-# v1.2: АДМИН-ПАНЕЛЬ ГИФОК
+# АДМИН-ПАНЕЛЬ ГИФОК
 # ============================================================
 
 @dp.callback_query(F.data == "admin_gif_panel")
 async def admin_gif_panel(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await show_gif_panel(callback.message)
@@ -3743,7 +3717,7 @@ async def show_gif_panel(message: Message):
 
 @dp.callback_query(F.data == "gif_add_start")
 async def gif_add_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     await state.set_state(AdminGifAdd.waiting_for_link)
@@ -3857,7 +3831,7 @@ async def gif_add_process(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.in_(["gif_list_ready", "gif_list_pending", "gif_list_error"]))
 async def gif_list_handler(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
 
@@ -3891,7 +3865,7 @@ async def gif_list_handler(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gif_view_"))
 async def gif_view(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
 
@@ -3951,7 +3925,7 @@ META_FIELDS = {
 
 @dp.callback_query(F.data.startswith("gif_edit_meta_"))
 async def gif_edit_meta(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     slug = callback.data.replace("gif_edit_meta_", "")
@@ -3967,7 +3941,7 @@ async def gif_edit_meta(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gif_edit_field_"))
 async def gif_edit_field(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     parts = callback.data.replace("gif_edit_field_", "").rsplit("_", 1)
@@ -4023,7 +3997,7 @@ PARAM_FIELDS = {
 
 @dp.callback_query(F.data.startswith("gif_edit_params_"))
 async def gif_edit_params(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     slug = callback.data.replace("gif_edit_params_", "")
@@ -4050,7 +4024,7 @@ async def gif_edit_params(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gif_param_field_"))
 async def gif_param_field(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     parts = callback.data.replace("gif_param_field_", "").rsplit("_", 1)
@@ -4116,7 +4090,7 @@ async def gif_param_value(message: Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("gif_regen_"))
 async def gif_regen(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     slug_full = callback.data.replace("gif_regen_", "")
@@ -4186,7 +4160,7 @@ async def gif_regen(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("gif_delete_"))
 async def gif_delete(callback: CallbackQuery):
-    await callback.answer()
+    await safe_answer(callback)
     if not await is_admin(callback.from_user.id):
         return
     slug = callback.data.replace("gif_delete_", "")
@@ -4384,7 +4358,6 @@ async def main():
     logger.info(f"🚀 Бот запускается... {VERSION}")
     await init_db()
 
-    # v1.2: запускаем Chromium для рендера гифок
     try:
         await gif_renderer.init_browser()
     except Exception as e:
