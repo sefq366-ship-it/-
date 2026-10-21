@@ -1,5 +1,6 @@
 # ============================================================
 # gif_renderer.py — рендер Lottie → MP4 для Telegram
+# v1.2.2: добавлена диагностика Chromium (CHROME_BIN, ldd, version)
 # ============================================================
 import asyncio
 import json
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import logging
+import os
 from pathlib import Path
 
 import aiohttp
@@ -39,18 +41,49 @@ _browser = None
 async def init_browser():
     """
     Запускает headless Chromium один раз при старте бота.
-    Флаги подобраны для стабильной работы в Docker-контейнере (Bothost):
-      --no-sandbox                — обязателен в контейнере
-      --disable-setuid-sandbox    — убирает проблемы с правами
-      --disable-dev-shm-usage     — /dev/shm в контейнере часто мал
-      --disable-gpu               — нет GPU в контейнере
-      --single-process            — экономит память
-      --no-zygote                 — страховка от падения в ограниченных окружениях
-      --disable-software-rasterizer — страховка от падения без GPU
+    Перед запуском выводит диагностику: путь, версия, missing libs.
     """
     global _browser
     if _browser is not None:
         return _browser
+
+    # ============================================================
+    # ДИАГНОСТИКА (временно, для отладки на Bothost)
+    # ============================================================
+    logger.info("=" * 60)
+    logger.info("🔍 ДИАГНОСТИКА CHROMIUM")
+    logger.info(f"CHROME_BIN = {os.environ.get('CHROME_BIN')}")
+    logger.info(f"/usr/bin/chromium exists = {os.path.exists('/usr/bin/chromium')}")
+    logger.info(f"/usr/bin/chromium-browser exists = {os.path.exists('/usr/bin/chromium-browser')}")
+    logger.info(f"/usr/bin/google-chrome exists = {os.path.exists('/usr/bin/google-chrome')}")
+
+    try:
+        ver = subprocess.run(
+            ['/usr/bin/chromium', '--version'],
+            capture_output=True, text=True, timeout=10
+        )
+        logger.info(f"chromium --version: {ver.stdout.strip() or ver.stderr.strip()} (rc={ver.returncode})")
+    except Exception as e:
+        logger.error(f"chromium --version failed: {e}")
+
+    try:
+        ldd = subprocess.run(
+            ['ldd', '/usr/bin/chromium'],
+            capture_output=True, text=True, timeout=10
+        )
+        missing = [l.strip() for l in ldd.stdout.split('\n') if 'not found' in l]
+        if missing:
+            logger.error(f"❌ MISSING LIBS: {missing}")
+        else:
+            logger.info("✅ Все библиотеки на месте (ldd не нашёл 'not found')")
+    except Exception as e:
+        logger.error(f"ldd failed: {e}")
+
+    logger.info("=" * 60)
+
+    # ============================================================
+    # ЗАПУСК
+    # ============================================================
     logger.info("🎬 Запускаю Chromium для рендера гифок...")
     _browser = await pyppeteer.launch(
         headless=True,
