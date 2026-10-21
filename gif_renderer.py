@@ -1,6 +1,9 @@
 # ============================================================
 # gif_renderer.py — рендер Lottie → MP4 для Telegram
-# v1.2.2: добавлена диагностика Chromium (CHROME_BIN, ldd, version)
+# v1.2.3: убраны лишние флаги pyppeteer (--single-process,
+#         --no-zygote, --disable-gpu, --disable-software-rasterizer),
+#         из-за которых Chromium падал с "Browser closed unexpectedly".
+#         Оставлены только 3 флага, как в рабочем боте v54.1.
 # ============================================================
 import asyncio
 import json
@@ -41,14 +44,16 @@ _browser = None
 async def init_browser():
     """
     Запускает headless Chromium один раз при старте бота.
-    Перед запуском выводит диагностику: путь, версия, missing libs.
+    Флаги: только 3, как в рабочем боте v54.1.
+    --single-process, --no-zygote, --disable-gpu убраны —
+    именно они ломали запуск в Docker (Browser closed unexpectedly).
     """
     global _browser
     if _browser is not None:
         return _browser
 
     # ============================================================
-    # ДИАГНОСТИКА (временно, для отладки на Bothost)
+    # ДИАГНОСТИКА (для отладки на Bothost, не мешает работе)
     # ============================================================
     logger.info("=" * 60)
     logger.info("🔍 ДИАГНОСТИКА CHROMIUM")
@@ -82,7 +87,7 @@ async def init_browser():
     logger.info("=" * 60)
 
     # ============================================================
-    # ЗАПУСК
+    # ЗАПУСК (только 3 флага, как в рабочем боте)
     # ============================================================
     logger.info("🎬 Запускаю Chromium для рендера гифок...")
     _browser = await pyppeteer.launch(
@@ -92,10 +97,6 @@ async def init_browser():
             '--no-sandbox',
             '--disable-setuid-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--single-process',
-            '--no-zygote',
-            '--disable-software-rasterizer',
         ]
     )
     logger.info("🎬 Chromium запущен")
