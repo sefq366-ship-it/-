@@ -1,9 +1,7 @@
 # ============================================================
 # gif_renderer.py — рендер Lottie → MP4 для Telegram
-# v1.2.3: убраны лишние флаги pyppeteer (--single-process,
-#         --no-zygote, --disable-gpu, --disable-software-rasterizer),
-#         из-за которых Chromium падал с "Browser closed unexpectedly".
-#         Оставлены только 3 флага, как в рабочем боте v54.1.
+# v1.2.4: Lottie URL теперь принимает ПОЛНЫЙ slug (durovscap-4074).
+#         Флаги pyppeteer — 3, как в рабочем боте v54.1.
 # ============================================================
 import asyncio
 import json
@@ -20,11 +18,6 @@ import pyppeteer
 
 logger = logging.getLogger("gif_renderer")
 
-# ============================================================
-# ⚙️ ПАРАМЕТРЫ РЕНДЕРА ПО УМОЛЧАНИЮ
-# Баланс качества и скорости:
-#   800×450, FPS 24, CRF 23, FRAME_SKIP 2
-# ============================================================
 DEFAULT_PARAMS = {
     "card_w": 800,
     "card_h": 450,
@@ -42,25 +35,15 @@ _browser = None
 
 
 async def init_browser():
-    """
-    Запускает headless Chromium один раз при старте бота.
-    Флаги: только 3, как в рабочем боте v54.1.
-    --single-process, --no-zygote, --disable-gpu убраны —
-    именно они ломали запуск в Docker (Browser closed unexpectedly).
-    """
+    """Запускает headless Chromium один раз. Флаги — как в рабочем боте."""
     global _browser
     if _browser is not None:
         return _browser
 
-    # ============================================================
-    # ДИАГНОСТИКА (для отладки на Bothost, не мешает работе)
-    # ============================================================
     logger.info("=" * 60)
     logger.info("🔍 ДИАГНОСТИКА CHROMIUM")
     logger.info(f"CHROME_BIN = {os.environ.get('CHROME_BIN')}")
     logger.info(f"/usr/bin/chromium exists = {os.path.exists('/usr/bin/chromium')}")
-    logger.info(f"/usr/bin/chromium-browser exists = {os.path.exists('/usr/bin/chromium-browser')}")
-    logger.info(f"/usr/bin/google-chrome exists = {os.path.exists('/usr/bin/google-chrome')}")
 
     try:
         ver = subprocess.run(
@@ -80,15 +63,11 @@ async def init_browser():
         if missing:
             logger.error(f"❌ MISSING LIBS: {missing}")
         else:
-            logger.info("✅ Все библиотеки на месте (ldd не нашёл 'not found')")
+            logger.info("✅ Все библиотеки на месте")
     except Exception as e:
         logger.error(f"ldd failed: {e}")
-
     logger.info("=" * 60)
 
-    # ============================================================
-    # ЗАПУСК (только 3 флага, как в рабочем боте)
-    # ============================================================
     logger.info("🎬 Запускаю Chromium для рендера гифок...")
     _browser = await pyppeteer.launch(
         headless=True,
@@ -116,20 +95,22 @@ async def close_browser():
 def check_ffmpeg():
     exe = shutil.which("ffmpeg")
     if not exe:
-        raise RuntimeError(
-            "ffmpeg не найден. Установи: Windows — https://www.gyan.dev/ffmpeg/builds/, "
-            "macOS — brew install ffmpeg, Linux — apt install ffmpeg"
-        )
+        raise RuntimeError("ffmpeg не найден")
     return exe
 
 
-async def download_lottie(slug: str, dest: Path):
-    url = LOTTIE_URL.format(slug=slug)
+async def download_lottie(slug_full: str, dest: Path):
+    """
+    v1.2.4: slug_full = "durovscap-4074" (полный, с номером).
+    URL: https://nft.fragment.com/gift/durovscap-4074.lottie.json
+    """
+    url = LOTTIE_URL.format(slug=slug_full)
+    logger.info(f"[lottie] → {url}")
     timeout = aiohttp.ClientTimeout(total=30)
     async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": UA}) as s:
         async with s.get(url) as r:
             if r.status != 200:
-                raise ValueError(f"Lottie HTTP {r.status} для {slug}")
+                raise ValueError(f"Lottie HTTP {r.status} для {slug_full} (url={url})")
             data = await r.read()
     dest.write_bytes(data)
     return len(data)
@@ -177,13 +158,13 @@ def _build_html(bg_data: dict, anim_data: dict, params: dict) -> str:
 </html>"""
 
 
-async def render_mp4(slug: str, out_mp4: Path, params: dict, work_dir: Path):
+async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path):
     browser = await init_browser()
     ff = check_ffmpeg()
 
     lottie_path = work_dir / "anim.json"
-    size = await download_lottie(slug, lottie_path)
-    logger.info(f"[render] {slug}: Lottie {size} байт")
+    size = await download_lottie(slug_full, lottie_path)
+    logger.info(f"[render] {slug_full}: Lottie {size} байт")
 
     data = json.loads(lottie_path.read_text(encoding="utf-8"))
 
@@ -203,7 +184,7 @@ async def render_mp4(slug: str, out_mp4: Path, params: dict, work_dir: Path):
     anim_layers = [x for x in layers if x.get("nm") in anim_names]
 
     if not bg_layers or not anim_layers:
-        raise RuntimeError(f"Не найдены слои Background/Gift в Lottie {slug}")
+        raise RuntimeError(f"Не найдены слои Background/Gift в Lottie {slug_full}")
 
     bg_data = dict(data); bg_data["layers"] = bg_layers
     anim_data = dict(data); anim_data["layers"] = anim_layers
@@ -226,7 +207,7 @@ async def render_mp4(slug: str, out_mp4: Path, params: dict, work_dir: Path):
             fp = frames_dir / f"f_{idx:06d}.png"
             await page.screenshot({"path": str(fp), "omitBackground": True})
 
-        logger.info(f"[render] {slug}: {len(frame_numbers)} кадров, fps={final_fps}")
+        logger.info(f"[render] {slug_full}: {len(frame_numbers)} кадров, fps={final_fps}")
     finally:
         await page.close()
 
@@ -250,13 +231,16 @@ async def render_mp4(slug: str, out_mp4: Path, params: dict, work_dir: Path):
         raise RuntimeError(f"ffmpeg error: {res.stderr[-500:]}")
 
     size_mp4 = out_mp4.stat().st_size
-    logger.info(f"[render] {slug}: MP4 {size_mp4} байт")
+    logger.info(f"[render] {slug_full}: MP4 {size_mp4} байт")
     return size_mp4
 
 
-async def render_to_tempfile(slug: str, params: dict = None):
+async def render_to_tempfile(slug_full: str, params: dict = None):
+    """
+    v1.2.4: принимает ПОЛНЫЙ slug ("durovscap-4074").
+    """
     params = {**DEFAULT_PARAMS, **(params or {})}
-    work_dir = Path(tempfile.mkdtemp(prefix=f"gif_{slug}_"))
-    out_mp4 = work_dir / f"{slug}.mp4"
-    await render_mp4(slug, out_mp4, params, work_dir)
+    work_dir = Path(tempfile.mkdtemp(prefix=f"gif_{slug_full}_"))
+    out_mp4 = work_dir / f"{slug_full}.mp4"
+    await render_mp4(slug_full, out_mp4, params, work_dir)
     return out_mp4, work_dir
