@@ -37,6 +37,17 @@ _browser = None
 
 
 async def init_browser():
+    """
+    Запускает headless Chromium один раз при старте бота.
+    Флаги подобраны для стабильной работы в Docker-контейнере (Bothost):
+      --no-sandbox                — обязателен в контейнере
+      --disable-setuid-sandbox    — убирает проблемы с правами
+      --disable-dev-shm-usage     — /dev/shm в контейнере часто мал
+      --disable-gpu               — нет GPU в контейнере
+      --single-process            — экономит память
+      --no-zygote                 — страховка от падения в ограниченных окружениях
+      --disable-software-rasterizer — страховка от падения без GPU
+    """
     global _browser
     if _browser is not None:
         return _browser
@@ -50,6 +61,8 @@ async def init_browser():
             '--disable-dev-shm-usage',
             '--disable-gpu',
             '--single-process',
+            '--no-zygote',
+            '--disable-software-rasterizer',
         ]
     )
     logger.info("🎬 Chromium запущен")
