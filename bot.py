@@ -62,7 +62,7 @@ import pyppeteer
 from messages import MESSAGES
 
 # ---------- КОНФИГ ----------
-BOT_TOKEN = "8"
+BOT_TOKEN = "854422894"
 ADMIN_IDS = [1012040843]
 DB_PATH = "sales.db"
 BOT_URL = "https://t.me/Stars2ProfitBot"
@@ -78,7 +78,7 @@ db = None
 browser_instance = None
 gif_render_lock = asyncio.Lock()
 
-# ---------- ГЛОБАЛЬНЫЕ ПРЕМИУМ-ЭМОДЗИ ----------
+# ---------- ЭМОДЗИ ----------
 EMOJI_COLLECTION_FALLBACK = "🎁"
 EMOJI_DIAMOND  = '<tg-emoji emoji-id="5296742257146241213">💎</tg-emoji>'
 EMOJI_MONEY    = '<tg-emoji emoji-id="5902206159095339799">🤑</tg-emoji>'
@@ -122,16 +122,16 @@ dp.callback_query.middleware(ThrottlingMiddleware(0.3))
 
 # ---------- FSM ----------
 class AddProfit(StatesGroup):
-    waiting_for_nft_link = State()   # ИЗМЕНЕНО: ссылка теперь первая
+    waiting_for_nft_link = State()
     waiting_for_buy_amount = State()
     waiting_for_category = State()
     waiting_for_sell_amount = State()
     waiting_for_royalty = State()
 
 class PendingBuy(StatesGroup):
+    waiting_for_nft_link = State()
     waiting_for_buy_amount = State()
     waiting_for_category = State()
-    waiting_for_nft_link = State()
     waiting_for_royalty = State()
 
 class CompletePending(StatesGroup):
@@ -187,7 +187,6 @@ class TimerAdd(StatesGroup):
     waiting_for_nft_link = State()
     waiting_for_days = State()
 
-# НОВОЕ: Настройки гифки
 class GifSettingsStates(StatesGroup):
     waiting_for_value = State()
 
@@ -393,10 +392,15 @@ async def init_db():
             preset TEXT DEFAULT 'veryfast'
         );
         INSERT OR IGNORE INTO gif_settings (id) VALUES (1);
+        CREATE TABLE IF NOT EXISTS gif_cache (
+            slug TEXT PRIMARY KEY,
+            file_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
 
-    # --- Миграции ---
-    for col, typ in [('nft_link', 'TEXT'), ('gram_price', 'REAL DEFAULT 0'), ('gram_price_buy', 'REAL DEFAULT 0'), ('royalty_gram', 'REAL DEFAULT 0'), ('gif_file_id', 'TEXT')]:
+    # Миграции
+    for col, typ in [('nft_link', 'TEXT'), ('gram_price', 'REAL DEFAULT 0'), ('gram_price_buy', 'REAL DEFAULT 0'), ('royalty_gram', 'REAL DEFAULT 0')]:
         try: await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
         except: pass
 
@@ -444,7 +448,7 @@ async def log_error(error_type: str, details: str):
     except Exception as e:
         logger.error(f"Log error failure: {e}")
 
-# ---------- КЭШ КУРСА ----------
+# ---------- КУРС ----------
 gram_cache = {"price": 0.0, "timestamp": 0}
 
 async def get_gram_price():
@@ -467,7 +471,6 @@ async def get_gram_price():
         await log_error("coingecko", str(e)[:500])
     return gram_cache["price"] or 2.5
 
-# ---------- USD-ПРОФИТ ----------
 def compute_profit_usd(buy_amount, sell_amount, royalty, gram_price_buy, gram_price_sell, fallback_gram_price=0.0):
     try:
         gp_buy  = float(gram_price_buy or 0)
@@ -550,7 +553,6 @@ async def set_user_change_alert(user_id, enabled, percent=5.0):
     await conn.execute("INSERT OR REPLACE INTO user_change_alerts (user_id, enabled, percent) VALUES (?,?,?)", (user_id, int(enabled), percent))
     await conn.commit()
 
-# ---------- ЦЕЛЬ ----------
 async def check_goal_achievement(user_id):
     conn = await get_db()
     cur = await conn.execute("SELECT goal_gram, notified FROM profit_goals WHERE user_id=?", (user_id,))
@@ -574,7 +576,6 @@ async def check_goal_achievement(user_id):
         except Exception as e:
             logger.error(f"Goal notification error: {e}")
 
-# ---------- РЕФЕРАЛЫ ----------
 async def activate_referral(user_id: int):
     conn = await get_db()
     cur = await conn.execute("SELECT referrer_id, is_active FROM referrals WHERE user_id=?", (user_id,))
@@ -602,7 +603,6 @@ def get_next_level_points(points: int) -> int:
     elif points < 500: return 500 - points
     return 0
 
-# ---------- ПАРСИНГ NFT ----------
 def _esc(s):
     if s is None:
         return ""
@@ -731,10 +731,8 @@ async def parse_nft_link(nft_link: str):
     result = {"gift_name": gift_name}
     catalog = await get_gift_catalog_from_changes(gift_name)
     source_data = await get_gift_from_fragment(slug, number)
-    source_name = "fragment"
     if not source_data:
         source_data = await get_gift_from_tme(nft_link)
-        source_name = "t.me"
     if not source_data:
         if catalog and catalog.get("collection_emoji_id"): result["collection_emoji_id"] = catalog["collection_emoji_id"]
         return result
@@ -753,7 +751,6 @@ async def parse_nft_link(nft_link: str):
     if catalog and catalog.get("collection_emoji_id"): result["collection_emoji_id"] = catalog["collection_emoji_id"]
     return result
 
-# ---------- ФОРМАТИРОВАНИЕ ЭМОДЗИ ----------
 def premium_emoji(emoji_id, fallback: str) -> str:
     if emoji_id: return f'<tg-emoji emoji-id="{emoji_id}">{fallback}</tg-emoji>'
     return fallback
@@ -779,7 +776,6 @@ def format_gift_attributes(data: dict) -> str:
         lines.append(f"{emoji} {data['symbol']}{rarity}")
     return "\n".join(lines)
 
-# ---------- КЛАВИАТУРЫ ----------
 def get_main_kb(lang="ru"):
     msgs = MESSAGES[lang]
     return ReplyKeyboardMarkup(
@@ -799,7 +795,6 @@ def get_cancel_kb(lang="ru"):
         [InlineKeyboardButton(text=MESSAGES[lang]["cancel"], callback_data="cancel_deal")]
     ])
 
-# ---------- ГЕНЕРАЦИЯ ГИФКИ ----------
 async def download_file(url, path):
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120), headers={"User-Agent": "Mozilla/5.0"}) as s:
         async with s.get(url) as r:
@@ -921,18 +916,40 @@ async def render_gif_for_nft(slug, work_dir):
 
     return mp4_path
 
-# НОВОЕ: фоновый рендер (вызывается сразу после ввода ссылки)
 async def background_gif_render(nft_link):
     if not nft_link or "t.me/nft/" not in nft_link:
         return
     slug = nft_link.split("/nft/")[1].split("/")[0].split("?")[0]
+    
+    conn = await get_db()
+    cur = await conn.execute("SELECT file_id FROM gif_cache WHERE slug=?", (slug,))
+    row = await cur.fetchone()
+    if row and row[0]:
+        logger.info(f"Гифка для {slug} уже в кэше")
+        return
+    
     async with gif_render_lock:
         try:
             if not browser_instance:
                 return
             with tempfile.TemporaryDirectory() as tmp:
-                await render_gif_for_nft(slug, Path(tmp))
-            logger.info(f"Фоновая гифка для {slug} сгенерирована")
+                mp4_path = await render_gif_for_nft(slug, Path(tmp))
+                
+                msg = await bot.send_animation(
+                    chat_id=ADMIN_IDS[0],
+                    animation=FSInputFile(str(mp4_path), filename=f"{slug}.mp4"),
+                    disable_notification=True
+                )
+                file_id = msg.animation.file_id
+                
+                try:
+                    await bot.delete_message(chat_id=ADMIN_IDS[0], message_id=msg.message_id)
+                except:
+                    pass
+                
+                await conn.execute("INSERT OR REPLACE INTO gif_cache (slug, file_id) VALUES (?, ?)", (slug, file_id))
+                await conn.commit()
+                logger.info(f"Фоновая гифка для {slug} сохранена в кэш")
         except Exception as e:
             logger.warning(f"Фоновая гифка для {slug}: {e}")
 
@@ -942,8 +959,7 @@ async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
     user_id = message.from_user.id
     args = message.text.split()
-    
-    # Обработка перехода из инлайн-режима
+
     if len(args) > 1 and args[1] == "inline_help":
         await message.answer("🔍 Чтобы найти сделку в инлайн-режиме, введи её номер (например, #123) или название коллекции.")
         return
@@ -998,8 +1014,7 @@ async def switch_language(message: Message, state: FSMContext):
     await message.answer(msgs["lang_changed"], reply_markup=get_main_kb(new_lang))
 
 
-# ---------- ДОБАВЛЕНИЕ СДЕЛКИ ----------
-# ИЗМЕНЕНО: ссылка теперь первая
+# ---------- ДОБАВЛЕНИЕ СДЕЛКИ (ссылка первая) ----------
 @dp.message(F.text.in_(["📊 Добавить сделку", "📊 Add Deal"]))
 async def add_deal_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1028,7 +1043,6 @@ async def process_nft_link(message: Message, state: FSMContext):
         else:
             await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n<i>Характеристики не найдены</i>", reply_markup=get_cancel_kb(lang))
         
-        # ЗАПУСКАЕМ РЕНДЕР В ФОНЕ
         asyncio.create_task(background_gif_render(link))
 
     await state.set_state(AddProfit.waiting_for_buy_amount)
@@ -1169,11 +1183,37 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
 
-# ---------- ОТЛОЖЕННАЯ ПОКУПКА ----------
+# ---------- ОТЛОЖЕННАЯ ПОКУПКА (ссылка первая) ----------
 @dp.message(F.text.in_(["📥 Отложенная покупка", "📥 Pending Buy"]))
 async def pending_start(message: Message, state: FSMContext):
     await state.clear()
     lang = await get_user_lang(message.from_user.id)
+    await state.set_state(PendingBuy.waiting_for_nft_link)
+    await message.answer(MESSAGES[lang]["enter_nft_link"], reply_markup=get_cancel_kb(lang))
+
+
+@dp.message(PendingBuy.waiting_for_nft_link)
+async def process_pending_nft_link(message: Message, state: FSMContext):
+    lang = await get_user_lang(message.from_user.id)
+    link = message.text.strip()
+    if not link or link == "-":
+        await message.answer(MESSAGES[lang]["link_required"], reply_markup=get_cancel_kb(lang))
+        return
+    await state.update_data(nft_link=link)
+
+    nft_data = await parse_nft_link(link)
+    if nft_data:
+        await state.update_data(**nft_data)
+        attrs = format_gift_attributes(nft_data)
+        collection_emoji = premium_emoji(nft_data.get("collection_emoji_id"), EMOJI_COLLECTION_FALLBACK)
+        gift_name = nft_data.get('gift_name', 'NFT')
+        if attrs:
+            await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n{attrs}", reply_markup=get_cancel_kb(lang))
+        else:
+            await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n<i>Характеристики не найдены</i>", reply_markup=get_cancel_kb(lang))
+        
+        asyncio.create_task(background_gif_render(link))
+
     await state.set_state(PendingBuy.waiting_for_buy_amount)
     await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
 
@@ -1201,23 +1241,7 @@ async def process_pending_buy_amount(message: Message, state: FSMContext):
 async def process_pending_category(message: Message, state: FSMContext):
     lang = await get_user_lang(message.from_user.id)
     await state.update_data(category=message.text.strip())
-    await state.set_state(PendingBuy.waiting_for_nft_link)
-    await message.answer(MESSAGES[lang]["enter_nft_link"], reply_markup=get_cancel_kb(lang))
-
-
-@dp.message(PendingBuy.waiting_for_nft_link)
-async def process_pending_nft_link(message: Message, state: FSMContext):
-    lang = await get_user_lang(message.from_user.id)
-    link = message.text.strip()
-    if not link or link == "-":
-        await message.answer(MESSAGES[lang]["link_required"], reply_markup=get_cancel_kb(lang))
-        return
-    await state.update_data(nft_link=link)
-
-    nft_data = await parse_nft_link(link)
-    if nft_data:
-        await state.update_data(**nft_data)
-
+    
     royalty = await get_user_royalty(message.from_user.id)
     await state.set_state(PendingBuy.waiting_for_royalty)
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -1450,6 +1474,8 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
          nft_data.get("collection_emoji_id"))
     )
     await conn.execute("DELETE FROM pending_sales WHERE id=?", (pending_id,))
+    if row["nft_link"]:
+        await conn.execute("DELETE FROM timers WHERE user_id=? AND nft_link=? AND notified=0", (user_id, row["nft_link"]))
     await conn.commit()
     await add_user_collection(user_id, row["category"])
     await state.clear()
@@ -1512,6 +1538,7 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(MESSAGES[lang]["deleted"])
     except:
         await callback.message.answer(MESSAGES[lang]["deleted"])
+
 
 # ---------- РЕДАКТИРОВАНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
@@ -1637,7 +1664,6 @@ async def finalize_edit(message: Message, state: FSMContext, royalty: float, use
     )
 
     conn = await get_db()
-
     has_nft = any(k in data for k in ("model", "backdrop", "symbol", "gift_name"))
     if has_nft:
         await conn.execute(
@@ -2052,6 +2078,7 @@ async def calc_result(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer(MESSAGES[lang]["error_positive_number"], reply_markup=get_cancel_kb(lang))
+
 
 # ---------- УВЕДОМЛЕНИЯ О КУРСЕ ----------
 @dp.message(Command("alert"))
@@ -2551,7 +2578,6 @@ async def goal_later(callback: CallbackQuery):
     except:
         pass
 
-
 # ============================================================
 # АДМИН-ПАНЕЛЬ
 # ============================================================
@@ -2642,7 +2668,7 @@ async def admin_users(callback: CallbackQuery):
     await callback.message.answer(text)
 
 
-# ---------- НАСТРОЙКИ ГИФКИ В АДМИНКЕ ----------
+# ---------- НАСТРОЙКИ ГИФКИ ----------
 @dp.callback_query(F.data == "admin_gif_settings")
 async def admin_gif_settings(callback: CallbackQuery):
     await callback.answer()
@@ -2723,12 +2749,39 @@ async def gif_set_value(message: Message, state: FSMContext):
             await conn.execute(f"UPDATE gif_settings SET {db_col}=? WHERE id=1", (n,))
         await conn.commit()
         await message.answer("✅ Сохранено.")
-        # Возвращаем в меню настроек
-        await admin_gif_settings(type("C", (), {"answer": lambda: None, "from_user": message.from_user, "message": message})())
-    except:
+        
+        # Возвращаем в меню настроек (без edit_text, чтобы не ломалось, если сообщение не то)
+        s = await get_gif_settings()
+        text = (
+            "🎨 <b>Настройки гифки</b>\n\n"
+            f"📐 Ширина: <b>{s['width']}</b> px\n"
+            f"📐 Высота: <b>{s['height']}</b> px\n"
+            f"🎞 FPS: <b>{s['fps']}</b>\n"
+            f"⏭ Пропуск кадров: <b>{s['frame_skip']}</b>\n"
+            f"💾 CRF (качество): <b>{s['crf']}</b>\n"
+            f"⚡ Пресет: <b>{s['preset']}</b>\n\n"
+            "<i>Ширина/Высота: чем больше, тем четче, но медленнее рендер.\n"
+            "FPS: 24–30 оптимально.\n"
+            "Пропуск кадров: 2–4 = быстрее, но анимация менее плавная.\n"
+            "CRF: 18 = макс. качество, 28 = быстро и легко.\n"
+            "Пресет: ultrafast / veryfast / fast / medium / slow.</i>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📐 Ширина", callback_data="gif_set_width"),
+             InlineKeyboardButton(text="📐 Высота", callback_data="gif_set_height")],
+            [InlineKeyboardButton(text="🎞 FPS", callback_data="gif_set_fps"),
+             InlineKeyboardButton(text="⏭ Пропуск кадров", callback_data="gif_set_skip")],
+            [InlineKeyboardButton(text="💾 CRF", callback_data="gif_set_crf"),
+             InlineKeyboardButton(text="⚡ Пресет", callback_data="gif_set_preset")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
+        ])
+        await message.answer(text, reply_markup=kb)
+    except Exception as e:
+        logger.error(f"gif_set_value error: {e}")
         await message.answer("❌ Некорректное значение. Попробуй ещё раз.")
     finally:
         await state.clear()
+
 
 # ---------- РАСШИРЕННАЯ СТАТИСТИКА ----------
 @dp.callback_query(F.data == "admin_ext_stats")
@@ -3368,7 +3421,7 @@ async def send_startup_errors():
 
 
 # ============================================================
-# ИНЛАЙН-РЕЖИМ (С ГЕНЕРАЦИЕЙ ГИФКИ, БЕЗ УВЕДОМЛЕНИЯ)
+# ИНЛАЙН-РЕЖИМ (С КЭШИРОВАНИЕМ ГИФОК)
 # ============================================================
 def inline_bot_keyboard(user_id: int = None):
     if user_id:
@@ -3467,7 +3520,6 @@ async def inline_query(inline_query):
             reply_markup=inline_bot_keyboard(user_id=uid)
         ))
 
-    # Добавлена подсказка (switch_pm)
     try:
         await bot.answer_inline_query(
             inline_query.id, 
@@ -3512,7 +3564,7 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     except Exception as e:
         logger.error(f"inlinestats error: {e}")
 
-    # 1. Показываем текст с эмодзи
+    # 1. Сначала показываем текст с эмодзи
     for i in range(3):
         try:
             await chosen.bot.edit_message_text(
@@ -3526,51 +3578,60 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
             logger.warning(f"Edit text попытка {i+1}: {e}")
             await asyncio.sleep(0.5)
 
-    # 2. Проверяем гифку в БД
-    gif_file_id = deal_dict.get("gif_file_id")
-    if gif_file_id:
+    # 2. Ищем file_id: сначала в sales, потом в gif_cache по slug
+    gif_id = deal_dict.get("gif_file_id")
+    nft_link = deal_dict.get("nft_link")
+    slug = None
+    if nft_link and "t.me/nft/" in nft_link:
+        slug = nft_link.split("/nft/")[1].split("/")[0].split("?")[0]
+
+    if not gif_id and slug:
+        cur2 = await conn.execute("SELECT file_id FROM gif_cache WHERE slug=?", (slug,))
+        cache_row = await cur2.fetchone()
+        if cache_row and cache_row[0]:
+            gif_id = cache_row[0]
+            await conn.execute("UPDATE sales SET gif_file_id=? WHERE id=?", (gif_id, deal_id))
+            await conn.commit()
+
+    if gif_id:
         try:
             await chosen.bot.edit_message_media(
                 inline_message_id=chosen.inline_message_id,
                 media=InputMediaAnimation(
-                    media=gif_file_id,
+                    media=gif_id,
                     caption=build_inline_html(deal_dict),
                     parse_mode="HTML"
                 ),
                 reply_markup=inline_bot_keyboard(user_id=uid)
             )
+            logger.info(f"Гифка для deal #{deal_id} вставлена из кэша")
             return
         except Exception as e:
-            logger.warning(f"Attach old gif err: {e}")
+            logger.warning(f"Attach gif err: {e}")
 
-    # 3. Генерируем гифку
-    nft_link = deal_dict.get("nft_link")
-    if nft_link and "t.me/nft/" in nft_link:
-        slug = nft_link.split("/nft/")[1].split("/")[0].split("?")[0]
+    # 3. Если нет кэша — рендерим (на всякий случай, обычно не должно срабатывать)
+    if slug:
         try:
-            logger.info(f"Запуск генерации гифки для {slug}...")
+            logger.info(f"Генерация гифки для {slug} (кэш пуст)...")
             with tempfile.TemporaryDirectory() as tmp:
                 mp4_path = await render_gif_for_nft(slug, Path(tmp))
-                
-                # Отправляем в ЛС АДМИНУ, без уведомления, чтобы получить file_id
+
                 msg = await chosen.bot.send_animation(
                     chat_id=ADMIN_IDS[0],
                     animation=FSInputFile(str(mp4_path), filename=f"{slug}.mp4"),
                     disable_notification=True
                 )
                 new_gif_id = msg.animation.file_id
-                
-                # Удаляем служебное сообщение, чтобы не мусорить
+
                 try:
                     await chosen.bot.delete_message(chat_id=ADMIN_IDS[0], message_id=msg.message_id)
                 except:
                     pass
-                
-                # Сохраняем file_id в БД
+
+                await conn.execute("INSERT OR REPLACE INTO gif_cache (slug, file_id) VALUES (?,?)", (slug, new_gif_id))
                 await conn.execute("UPDATE sales SET gif_file_id=? WHERE id=?", (new_gif_id, deal_id))
                 await conn.commit()
-                
-                # Обновляем сообщение в инлайн-режиме
+
                 await chosen.bot.edit_message_media(
                     inline_message_id=chosen.inline_message_id,
                     media=InputMediaAnimation(
@@ -3580,7 +3641,7 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
                     ),
                     reply_markup=inline_bot_keyboard(user_id=uid)
                 )
-                logger.info(f"Гифка для {slug} успешно вставлена.")
+                logger.info(f"Гифка для {slug} сгенерирована и вставлена")
         except Exception as e:
             logger.error(f"Ошибка генерации гифки для {slug}: {e}")
             try:
@@ -3601,7 +3662,7 @@ async def main():
     global browser_instance
     logger.info("🚀 Бот запускается...")
     await init_db()
-    
+
     logger.info("Запускаю Chromium для рендера гифок...")
     try:
         browser_instance = await pyppeteer.launch(
@@ -3613,14 +3674,14 @@ async def main():
     except Exception as e:
         logger.error(f"Не удалось запустить Chromium: {e}")
         browser_instance = None
-    
+
     asyncio.create_task(check_alerts())
     asyncio.create_task(check_price_changes())
     asyncio.create_task(check_timers())
     asyncio.create_task(send_earnings_reports())
     asyncio.create_task(daily_backup_task())
     await send_startup_errors()
-    
+
     logger.info("🤖 Бот запущен!")
     try:
         await dp.start_polling(bot)
