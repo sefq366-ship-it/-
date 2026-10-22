@@ -1,15 +1,16 @@
 # ============================================================
-# bot.py — Gram2Profit v1.2.7
-# v1.2.7:
-#   - ретрай рендера 3 раза с интервалом 5 мин
-#   - в инлайне: pending → ⏳ "Гифка генерируется", error → текстовая карточка
-#   - если Fragment не отдал ни Lottie, ни .webp → текстовая карточка
-#     с премиум-эмодзи (без серых заглушек)
+# bot.py — Gram2Profit v1.3.0
+# v1.3.0:
+#   - Глобальные настройки качества гиф в админке
+#   - Заглушка (placeholder) для инлайна с логотипом
+#   - Премиум-эмодзи в инлайне
+#   - Замена заглушки на готовую гифку через edit_message_media
 # ============================================================
 
 import subprocess
 import sys
 import importlib
+import os
 
 REQUIRED_LIBS = {
     "aiogram": "aiogram",
@@ -24,7 +25,6 @@ for module_name, pip_name in REQUIRED_LIBS.items():
         print(f"[auto-install] Устанавливаю {pip_name}...", flush=True)
         try:
             subprocess.check_call([sys.executable, "-m", "pip", "install", "--no-cache-dir", "--quiet", pip_name])
-            print(f"[auto-install] {pip_name} установлен", flush=True)
         except Exception as e:
             print(f"[auto-install] Ошибка установки {pip_name}: {e}", flush=True)
 
@@ -58,11 +58,10 @@ from aiogram.types import (
 )
 
 from messages import MESSAGES
-
 import gif_db
 import gif_renderer
 
-BOT_TOKEN = "85"
+BOT_TOKEN = os.getenv("BOT_TOKEN", "85")
 ADMIN_IDS = [1012040843]
 DB_PATH = "sales.db"
 BOT_URL = "https://t.me/Stars2ProfitBot"
@@ -70,7 +69,7 @@ BOT_URL = "https://t.me/Stars2ProfitBot"
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-VERSION = "v1.2.7 (retry-gif, inline-status, no-placeholder)"
+VERSION = "v1.3.0 (global-settings, placeholder, inline-emoji)"
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 storage = MemoryStorage()
@@ -87,6 +86,9 @@ EMOJI_LINK     = '<tg-emoji emoji-id="6028171274939797252">🔗</tg-emoji>'
 EMOJI_MODEL_FALLBACK    = "🎨"
 EMOJI_BACKDROP_FALLBACK = "⚫"
 EMOJI_SYMBOL_FALLBACK   = "🌸"
+
+# Глобальные настройки (загружаются при старте)
+GLOBAL_SETTINGS = {}
 
 
 async def safe_answer(callback: CallbackQuery):
@@ -202,6 +204,10 @@ class AdminGifEditMeta(StatesGroup):
 
 class AdminGifEditParams(StatesGroup):
     waiting_for_value = State()
+
+class AdminGifSettings(StatesGroup):
+    waiting_for_value = State()
+    waiting_for_placeholder = State()
 
 
 async def get_user_lang(user_id):
@@ -345,7 +351,8 @@ async def init_db():
         );
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id INTEGER PRIMARY KEY,
-            lang TEXT DEFAULT 'ru'
+            lang TEXT DEFAULT 'ru',
+            show_usd INTEGER DEFAULT 1
         );
         CREATE TABLE IF NOT EXISTS donations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -362,7 +369,8 @@ async def init_db():
             stars_amount INTEGER,
             event_time REAL,
             description TEXT,
-            notified INTEGER DEFAULT 0
+            notified INTEGER DEFAULT 0,
+            pending_id INTEGER
         );
         CREATE TABLE IF NOT EXISTS user_earnings_reports (
             user_id INTEGER PRIMARY KEY,
@@ -406,70 +414,6 @@ async def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             reported INTEGER DEFAULT 0
         );
-    ''')
-
-    for col, typ in [
-        ('nft_link', 'TEXT'),
-        ('gram_price', 'REAL DEFAULT 0'),
-        ('gram_price_buy', 'REAL DEFAULT 0'),
-        ('royalty_gram', 'REAL DEFAULT 0'),
-    ]:
-        try:
-            await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
-        except:
-            pass
-
-    for col in ['nft_image', 'nft_name', 'collection_emoji_id']:
-        try:
-            await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} TEXT")
-        except:
-            pass
-
-    for col, typ in [('gram_price_buy', 'REAL DEFAULT 0'), ('gram_price_sell', 'REAL DEFAULT 0')]:
-        try:
-            await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} {typ}")
-        except:
-            pass
-
-    nft_cols = [
-        ('gift_name', 'TEXT'),
-        ('model', 'TEXT'), ('model_rarity', 'TEXT'), ('model_emoji_id', 'TEXT'),
-        ('backdrop', 'TEXT'), ('backdrop_rarity', 'TEXT'), ('backdrop_emoji_id', 'TEXT'),
-        ('symbol', 'TEXT'), ('symbol_rarity', 'TEXT'), ('symbol_emoji_id', 'TEXT'),
-        ('collection_emoji_id', 'TEXT'),
-    ]
-    for col, typ in nft_cols:
-        try:
-            await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} {typ}")
-        except:
-            pass
-
-    for col, typ in nft_cols:
-        try:
-            await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
-        except:
-            pass
-
-    try:
-        await conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
-    except:
-        pass
-    try:
-        await conn.execute("ALTER TABLE user_change_alerts ADD COLUMN disabled_until REAL DEFAULT 0")
-    except:
-        pass
-
-    try:
-        await conn.execute("ALTER TABLE user_settings ADD COLUMN show_usd INTEGER DEFAULT 1")
-    except:
-        pass
-
-    try:
-        await conn.execute("ALTER TABLE timers ADD COLUMN pending_id INTEGER")
-    except:
-        pass
-
-    await conn.execute('''
         CREATE TABLE IF NOT EXISTS gif_cache (
             slug TEXT PRIMARY KEY,
             nft_link TEXT,
@@ -488,25 +432,68 @@ async def init_db():
             created_by INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+        );
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
     ''')
+
+    for col, typ in [
+        ('nft_link', 'TEXT'), ('gram_price', 'REAL DEFAULT 0'),
+        ('gram_price_buy', 'REAL DEFAULT 0'), ('royalty_gram', 'REAL DEFAULT 0'),
+    ]:
+        try: await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
+        except: pass
+
+    for col in ['nft_image', 'nft_name', 'collection_emoji_id']:
+        try: await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} TEXT")
+        except: pass
+
+    for col, typ in [('gram_price_buy', 'REAL DEFAULT 0'), ('gram_price_sell', 'REAL DEFAULT 0')]:
+        try: await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} {typ}")
+        except: pass
+
+    nft_cols = [
+        ('gift_name', 'TEXT'), ('model', 'TEXT'), ('model_rarity', 'TEXT'), ('model_emoji_id', 'TEXT'),
+        ('backdrop', 'TEXT'), ('backdrop_rarity', 'TEXT'), ('backdrop_emoji_id', 'TEXT'),
+        ('symbol', 'TEXT'), ('symbol_rarity', 'TEXT'), ('symbol_emoji_id', 'TEXT'),
+        ('collection_emoji_id', 'TEXT'),
+    ]
+    for col, typ in nft_cols:
+        try: await conn.execute(f"ALTER TABLE sales ADD COLUMN {col} {typ}")
+        except: pass
+
+    for col, typ in nft_cols:
+        try: await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
+        except: pass
+
+    try: await conn.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER")
+    except: pass
+    try: await conn.execute("ALTER TABLE user_change_alerts ADD COLUMN disabled_until REAL DEFAULT 0")
+    except: pass
+    try: await conn.execute("ALTER TABLE user_settings ADD COLUMN show_usd INTEGER DEFAULT 1")
+    except: pass
+    try: await conn.execute("ALTER TABLE timers ADD COLUMN pending_id INTEGER")
+    except: pass
 
     for idx_sql in [
         "CREATE INDEX IF NOT EXISTS idx_gif_cache_status ON gif_cache(status)",
         "CREATE INDEX IF NOT EXISTS idx_gif_cache_gift ON gif_cache(gift_name)",
         "CREATE INDEX IF NOT EXISTS idx_timers_pending ON timers(pending_id)",
     ]:
-        try:
-            await conn.execute(idx_sql)
-        except:
-            pass
+        try: await conn.execute(idx_sql)
+        except: pass
 
     for admin_id in ADMIN_IDS:
-        try:
-            await conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (admin_id,))
-        except:
-            pass
+        try: await conn.execute("INSERT OR IGNORE INTO admins (user_id) VALUES (?)", (admin_id,))
+        except: pass
     await conn.commit()
+
+
+async def load_global_settings():
+    global GLOBAL_SETTINGS
+    GLOBAL_SETTINGS = await gif_db.get_bot_settings()
 
 
 async def log_action(user_id: int, username: str, action: str, details: str = ""):
@@ -516,9 +503,7 @@ async def log_action(user_id: int, username: str, action: str, details: str = ""
             "INSERT INTO action_logs (user_id, username, action, details) VALUES (?,?,?,?)",
             (user_id, username or "", action, details[:500])
         )
-        await conn.execute(
-            "DELETE FROM action_logs WHERE id NOT IN (SELECT id FROM action_logs ORDER BY id DESC LIMIT 500)"
-        )
+        await conn.execute("DELETE FROM action_logs WHERE id NOT IN (SELECT id FROM action_logs ORDER BY id DESC LIMIT 500)")
         await conn.commit()
     except Exception as e:
         logger.error(f"Log action error: {e}")
@@ -531,9 +516,7 @@ async def log_error(error_type: str, details: str):
             "INSERT INTO error_logs (error_type, details) VALUES (?,?)",
             (error_type, details[:2000])
         )
-        await conn.execute(
-            "DELETE FROM error_logs WHERE id NOT IN (SELECT id FROM error_logs ORDER BY id DESC LIMIT 500)"
-        )
+        await conn.execute("DELETE FROM error_logs WHERE id NOT IN (SELECT id FROM error_logs ORDER BY id DESC LIMIT 500)")
         await conn.commit()
     except Exception as e:
         logger.error(f"Log error failure: {e}")
@@ -756,17 +739,12 @@ def parse_gift_info_from_link(nft_link: str):
 
 async def get_gift_from_fragment(slug: str, number: int):
     url = f"https://nft.fragment.com/gift/{slug}-{number}.json"
-    logger.info(f"[fragment] → запрос: {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json",
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.info(f"[fragment] HTTP {resp.status}")
                     return None
                 data = json.loads(await resp.text())
                 attrs = data.get("attributes") or []
@@ -774,276 +752,163 @@ async def get_gift_from_fragment(slug: str, number: int):
                 for attr in attrs:
                     t = (attr.get("trait_type") or "").lower()
                     v = attr.get("value")
-                    if t == "model":
-                        result["model_name"] = v
-                    elif t == "backdrop":
-                        result["backdrop_name"] = v
-                    elif t == "symbol":
-                        result["symbol_name"] = v
+                    if t == "model": result["model_name"] = v
+                    elif t == "backdrop": result["backdrop_name"] = v
+                    elif t == "symbol": result["symbol_name"] = v
                 result["gift_name"] = data.get("name") or None
                 result["image"] = data.get("image") or None
                 if any(result.get(k) for k in ("model_name", "backdrop_name", "symbol_name")):
-                    logger.info(f"[fragment] ✅ OK: {slug}-{number}")
                     return result
                 return None
-    except asyncio.TimeoutError:
-        logger.warning(f"[fragment] Timeout")
-    except Exception as e:
-        logger.warning(f"[fragment] {type(e).__name__}: {e}")
-    return None
+    except Exception:
+        return None
 
 
 def _parse_tme_description(description: str) -> dict:
     result = {}
-    if not description:
-        return result
+    if not description: return result
     for raw_line in description.split("\n"):
         line = raw_line.strip()
-        if not line:
-            continue
+        if not line: continue
         m = re.match(r'^Model\s*:\s*(.+)$', line, re.IGNORECASE)
-        if m:
-            result["model_name"] = m.group(1).strip().rstrip(".")
-            continue
+        if m: result["model_name"] = m.group(1).strip().rstrip("."); continue
         m = re.match(r'^Backdrop\s*:\s*(.+)$', line, re.IGNORECASE)
-        if m:
-            result["backdrop_name"] = m.group(1).strip().rstrip(".")
-            continue
+        if m: result["backdrop_name"] = m.group(1).strip().rstrip("."); continue
         m = re.match(r'^Symbol\s*:\s*(.+)$', line, re.IGNORECASE)
-        if m:
-            result["symbol_name"] = m.group(1).strip().rstrip(".")
-            continue
-    if result:
-        return result
-    m = re.search(
-        r'appearance\s+(.+?)\s+on\s+an?\s+(.+?)\s+background\s+with\s+(.+?)\s+icons?',
-        description, re.IGNORECASE
-    )
+        if m: result["symbol_name"] = m.group(1).strip().rstrip("."); continue
+    if result: return result
+    m = re.search(r'appearance\s+(.+?)\s+on\s+an?\s+(.+?)\s+background\s+with\s+(.+?)\s+icons?', description, re.IGNORECASE)
     if m:
-        result["model_name"]    = m.group(1).strip()
+        result["model_name"] = m.group(1).strip()
         result["backdrop_name"] = m.group(2).strip()
-        result["symbol_name"]   = m.group(3).strip()
+        result["symbol_name"] = m.group(3).strip()
         return result
-    for key, field in (("model_name", "Model"), ("backdrop_name", "Backdrop"), ("symbol_name", "Symbol")):
-        m = re.search(rf'{field}\s*:\s*([^.\n]+)', description, re.IGNORECASE)
-        if m:
-            result[key] = m.group(1).strip()
     return result
 
 
 async def get_gift_from_tme(nft_link: str):
     url = nft_link.strip()
-    if not url.startswith("http"):
-        url = "https://" + url
+    if not url.startswith("http"): url = "https://" + url
     url = url.rstrip("/")
-    logger.info(f"[t.me] → запрос: {url}")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"}
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers, allow_redirects=True) as resp:
-                if resp.status != 200:
-                    logger.warning(f"[t.me] HTTP {resp.status}")
-                    return None
+                if resp.status != 200: return None
                 html_text = await resp.text()
-
-                m = re.search(
-                    r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']',
-                    html_text
-                )
+                m = re.search(r'<meta[^>]+property=["\']og:description["\'][^>]+content=["\']([^"\']+)["\']', html_text)
                 if not m:
-                    m = re.search(
-                        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']',
-                        html_text
-                    )
-                if not m:
-                    logger.warning(f"[t.me] og:description не найден")
-                    return None
-
+                    m = re.search(r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:description["\']', html_text)
+                if not m: return None
                 description = html.unescape(m.group(1))
                 result = _parse_tme_description(description)
-
                 emoji_patterns = {
-                    "model_emoji_id":    r'Model[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
+                    "model_emoji_id": r'Model[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
                     "backdrop_emoji_id": r'Backdrop[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
-                    "symbol_emoji_id":   r'Symbol[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
+                    "symbol_emoji_id": r'Symbol[^<]*</td>.*?<tg-emoji\s+emoji-id="(\d+)"',
                 }
                 for key, pattern in emoji_patterns.items():
                     m2 = re.search(pattern, html_text, re.IGNORECASE | re.DOTALL)
-                    if m2:
-                        result[key] = m2.group(1)
-
-                if any(result.get(k) for k in ("model_name", "backdrop_name", "symbol_name",
-                                                "model_emoji_id", "backdrop_emoji_id", "symbol_emoji_id")):
-                    logger.info(f"[t.me] ✅ OK")
+                    if m2: result[key] = m2.group(1)
+                if any(result.get(k) for k in ("model_name", "backdrop_name", "symbol_name")):
                     return result
-
                 return None
-    except asyncio.TimeoutError:
-        logger.warning(f"[t.me] Timeout")
-    except Exception as e:
-        logger.warning(f"[t.me] {type(e).__name__}: {e}")
-    return None
+    except Exception:
+        return None
 
 
 async def get_gift_catalog_from_changes(gift_name: str):
-    if not gift_name:
-        return None
-    slug = gift_name.lower().strip()
-    slug = slug.replace("’", "").replace("'", "").replace("`", "").replace(" ", "-")
+    if not gift_name: return None
+    slug = gift_name.lower().strip().replace("’", "").replace("'", "").replace("`", "").replace(" ", "-")
     slug = re.sub(r"[^a-z0-9\-]", "", slug)
-    if not slug:
-        return None
-
+    if not slug: return None
     url = f"https://api.changes.tg/emoji/{slug}"
-    logger.info(f"[changes.tg] → {url}")
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-
     def fmt_rarity(val):
-        if val is None:
-            return None
+        if val is None: return None
         try:
             v = float(val)
             return f"{int(v) if v == int(v) else v}%"
-        except (TypeError, ValueError):
-            return f"{val}%"
-
+        except: return f"{val}%"
     try:
         timeout = aiohttp.ClientTimeout(total=15)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 data = json.loads(await resp.text())
-
                 catalog = {"models": {}, "backdrops": {}, "symbols": {}}
-                for src_key, dst_key in (
-                    ("models", "models"),
-                    ("backdrops", "backdrops"),
-                    ("patterns", "symbols"),
-                ):
+                for src_key, dst_key in (("models", "models"), ("backdrops", "backdrops"), ("patterns", "symbols")):
                     for item in (data.get(src_key) or []):
-                        if not isinstance(item, dict):
-                            continue
+                        if not isinstance(item, dict): continue
                         name = item.get("name")
-                        if not name:
-                            continue
+                        if not name: continue
                         catalog[dst_key][name.lower()] = {
-                            "name":     name,
-                            "rarity":   fmt_rarity(item.get("rarity")),
-                            "emoji_id": item.get("customEmojiId"),
+                            "name": name, "rarity": fmt_rarity(item.get("rarity")), "emoji_id": item.get("customEmojiId"),
                         }
-
-                for old_key, dst_key in (
-                    ("model", "models"), ("backdrop", "backdrops"), ("pattern", "symbols"),
-                ):
-                    item = data.get(old_key)
-                    if isinstance(item, dict) and item.get("name"):
-                        key = item["name"].lower()
-                        if key not in catalog[dst_key]:
-                            catalog[dst_key][key] = {
-                                "name":     item.get("name"),
-                                "rarity":   fmt_rarity(item.get("rarity")),
-                                "emoji_id": item.get("customEmojiId"),
-                            }
-
                 catalog["collection_emoji_id"] = data.get("originalCustomEmojiId")
-                total = sum(len(v) for v in catalog.values() if isinstance(v, dict))
-                logger.info(f"[changes.tg] ✅ каталог: {total} вариантов")
                 return catalog
-    except Exception as e:
-        logger.warning(f"[changes.tg] catalog error: {e}")
-    return None
+    except Exception:
+        return None
 
 
 def _find_in_catalog(catalog: dict, section: str, name: str):
-    if not catalog or not name:
-        return None
+    if not catalog or not name: return None
     bucket = catalog.get(section) or {}
     key = name.strip().lower()
-    if key in bucket:
-        return bucket[key]
-    def norm(s):
-        return re.sub(r"[^a-z0-9]", "", s.lower())
+    if key in bucket: return bucket[key]
+    def norm(s): return re.sub(r"[^a-z0-9]", "", s.lower())
     nkey = norm(name)
     for k, v in bucket.items():
-        if norm(k) == nkey:
-            return v
+        if norm(k) == nkey: return v
     return None
 
 
 async def parse_nft_link(nft_link: str):
     gift_name, slug, number = parse_gift_info_from_link(nft_link)
-    logger.info(f"[parse_nft_link] input='{nft_link}' → name={gift_name!r} slug={slug!r} number={number!r}")
-    if not gift_name or slug is None or number is None:
-        return None
-
+    if not gift_name or slug is None or number is None: return None
     result = {"gift_name": gift_name}
     catalog = await get_gift_catalog_from_changes(gift_name)
-
     source_data = await get_gift_from_fragment(slug, number)
     if not source_data:
         source_data = await get_gift_from_tme(nft_link)
-
     if not source_data:
         if catalog and catalog.get("collection_emoji_id"):
             result["collection_emoji_id"] = catalog["collection_emoji_id"]
         return result
-
     if source_data.get("gift_name"):
         result["gift_name"] = source_data["gift_name"]
-
-    for name_key, section, out_prefix in (
-        ("model_name",    "models",    "model"),
-        ("backdrop_name", "backdrops", "backdrop"),
-        ("symbol_name",   "symbols",   "symbol"),
-    ):
+    for name_key, section, out_prefix in (("model_name", "models", "model"), ("backdrop_name", "backdrops", "backdrop"), ("symbol_name", "symbols", "symbol")):
         real_name = source_data.get(name_key)
-        if not real_name:
-            continue
+        if not real_name: continue
         result[out_prefix] = real_name
-
         tme_emoji_key = f"{out_prefix}_emoji_id"
         if source_data.get(tme_emoji_key):
             result[tme_emoji_key] = source_data[tme_emoji_key]
-
         match = _find_in_catalog(catalog, section, real_name)
         if match:
             result[f"{out_prefix}_rarity"] = match.get("rarity")
-            if not result.get(tme_emoji_key):
-                result[tme_emoji_key] = match.get("emoji_id")
+            if not result.get(tme_emoji_key): result[tme_emoji_key] = match.get("emoji_id")
         else:
             result[f"{out_prefix}_rarity"] = None
-            if not result.get(tme_emoji_key):
-                result[tme_emoji_key] = None
-
+            if not result.get(tme_emoji_key): result[tme_emoji_key] = None
     if catalog and catalog.get("collection_emoji_id"):
         result["collection_emoji_id"] = catalog["collection_emoji_id"]
-
     return result
 
 
 def _extract_slug_from_link(nft_link: str):
-    if not nft_link:
-        return None, None, None
+    if not nft_link: return None, None, None
     link = nft_link.strip().split("?")[0].split("#")[0].rstrip("/")
-    if "/nft/" not in link:
-        return None, None, None
+    if "/nft/" not in link: return None, None, None
     try:
         gift_segment = link.split("/nft/")[1].split("/")[0]
-        if "-" not in gift_segment:
-            return None, None, None
+        if "-" not in gift_segment: return None, None, None
         slug_raw, number_raw = gift_segment.rsplit("-", 1)
-        if not number_raw.isdigit():
-            return None, None, None
+        if not number_raw.isdigit(): return None, None, None
         slug_short = slug_raw.lower()
         return f"{slug_short}-{number_raw}", slug_short, int(number_raw)
-    except:
-        return None, None, None
+    except: return None, None, None
 
 
 def premium_emoji(emoji_id, fallback: str) -> str:
@@ -1058,8 +923,7 @@ def get_collection_emoji_html(deal: dict) -> str:
 
 
 def format_gift_attributes(data: dict) -> str:
-    if not data:
-        return ""
+    if not data: return ""
     lines = []
     if data.get("model"):
         emoji = premium_emoji(data.get("model_emoji_id"), EMOJI_MODEL_FALLBACK)
@@ -1077,26 +941,17 @@ def format_gift_attributes(data: dict) -> str:
 
 
 def _build_gif_caption(nft_data: dict, deal_id: int = None) -> str:
-    """Подпись под гифкой — с премиум-эмодзи."""
     gift_name = nft_data.get("gift_name") or "NFT"
     collection_emoji = premium_emoji(nft_data.get("collection_emoji_id"), EMOJI_COLLECTION_FALLBACK)
-
     lines = [f"{collection_emoji} <b>{html.escape(gift_name)}</b>"]
-    if deal_id:
-        lines[0] += f" · #{deal_id}"
-
+    if deal_id: lines[0] += f" · #{deal_id}"
     attrs = format_gift_attributes(nft_data)
     if attrs:
-        lines.append("")
-        lines.append(attrs)
-
+        lines.append(""); lines.append(attrs)
     if nft_data.get("nft_link"):
-        lines.append("")
-        lines.append(f'{EMOJI_LINK} <a href="{html.escape(nft_data["nft_link"])}">Открыть NFT</a>')
-
+        lines.append(""); lines.append(f'{EMOJI_LINK} <a href="{html.escape(nft_data["nft_link"])}">Открыть NFT</a>')
     text = "\n".join(lines)
-    if len(text) > 1024:
-        text = text[:1020] + "…"
+    if len(text) > 1024: text = text[:1020] + "…"
     return text
 
 
@@ -1107,58 +962,50 @@ async def cleanup_timers_for_pending(conn, pending_id: int, nft_link: str, user_
         cnt1 = (await cur.fetchone())[0] or 0
         await conn.execute("DELETE FROM timers WHERE pending_id=?", (pending_id,))
         deleted += cnt1
-    except:
-        pass
-
+    except: pass
     if nft_link:
         try:
-            cur = await conn.execute(
-                "SELECT COUNT(*) FROM timers WHERE user_id=? AND event_type='mint' AND nft_link=? AND notified=0",
-                (user_id, nft_link)
-            )
+            cur = await conn.execute("SELECT COUNT(*) FROM timers WHERE user_id=? AND event_type='mint' AND nft_link=? AND notified=0", (user_id, nft_link))
             cnt2 = (await cur.fetchone())[0] or 0
-            await conn.execute(
-                "DELETE FROM timers WHERE user_id=? AND event_type='mint' AND nft_link=? AND notified=0",
-                (user_id, nft_link)
-            )
+            await conn.execute("DELETE FROM timers WHERE user_id=? AND event_type='mint' AND nft_link=? AND notified=0", (user_id, nft_link))
             deleted += cnt2
-        except:
-            pass
-
+        except: pass
     return deleted
 
-
 # ============================================================
-# v1.2.7: генерация гифки с ретраем 3 раза
+# v1.3.0: генерация гифки с ретраем + обновление инлайна
 # ============================================================
 async def generate_gif_background(slug_full: str, slug_short: str, number: int,
-                                   nft_link: str, nft_data: dict, user_id: int, attempt: int = 1):
-    """
-    v1.2.7: 3 попытки с интервалом 5 минут.
-    Если Fragment не отдал ни Lottie, ни .webp — статус 'error',
-    в инлайне покажется текстовая карточка с премиум-эмодзи.
-    """
+                                   nft_link: str, nft_data: dict, user_id: int,
+                                   inline_message_id: str = None, attempt: int = 1):
+    """Рендерит гифку, при успехе обновляет инлайн-сообщение (если есть)."""
     existing = await gif_db.gif_get_ready(slug_full)
     if existing:
-        logger.info(f"[gif] {slug_full}: уже в кэше, пропускаем")
+        logger.info(f"[gif] {slug_full}: уже в кэше")
+        if inline_message_id:
+            await update_inline_message(inline_message_id, existing["mpeg4_file_id"], nft_data)
         return
 
     existing = await gif_db.gif_get(slug_full)
     if existing and existing.get("status") == "pending":
-        logger.info(f"[gif] {slug_full}: уже рендерится, пропускаем")
+        logger.info(f"[gif] {slug_full}: уже рендерится")
         return
 
     gift_name = nft_data.get("gift_name") or slug_short
+    params = GLOBAL_SETTINGS.copy()
+    # Удаляем лишние ключи, которых нет в DEFAULT_PARAMS
+    params.pop("sticker_file_id", None)
+
     await gif_db.gif_set_pending(
         slug_full, nft_link, gift_name, user_id,
-        params_json=json.dumps(gif_renderer.DEFAULT_PARAMS)
+        params_json=json.dumps(params)
     )
 
     mp4_path = None
     work_dir = None
     try:
         logger.info(f"[gif] {slug_full}: старт рендера (attempt {attempt})")
-        mp4_path, work_dir = await gif_renderer.render_to_tempfile(slug_full)
+        mp4_path, work_dir = await gif_renderer.render_to_tempfile(slug_full, params=params)
 
         admin_chat = ADMIN_IDS[0]
         msg = await bot.send_animation(
@@ -1169,57 +1016,71 @@ async def generate_gif_background(slug_full: str, slug_short: str, number: int,
         )
 
         file_id = None
-        if msg.animation:
-            file_id = msg.animation.file_id
-        elif msg.document:
-            file_id = msg.document.file_id
+        if msg.animation: file_id = msg.animation.file_id
+        elif msg.document: file_id = msg.document.file_id
 
-        try:
-            await bot.delete_message(chat_id=admin_chat, message_id=msg.message_id)
-        except:
-            pass
+        try: await bot.delete_message(chat_id=admin_chat, message_id=msg.message_id)
+        except: pass
 
         if not file_id:
             raise RuntimeError("Telegram не вернул file_id")
 
-        cached = await gif_db.gif_get(slug_full)
-        if cached:
-            for k in ("model_emoji_id", "backdrop_emoji_id", "symbol_emoji_id",
-                      "collection_emoji_id", "model_rarity", "backdrop_rarity", "symbol_rarity"):
-                if not nft_data.get(k) and cached.get(k):
-                    nft_data[k] = cached[k]
-
         caption = _build_gif_caption(nft_data)
-        await gif_db.gif_set_ready(slug_full, file_id, nft_data, caption,
-                                    params_json=json.dumps(gif_renderer.DEFAULT_PARAMS))
-        logger.info(f"[gif] {slug_full}: ✅ file_id={file_id[:30]}...")
+        await gif_db.gif_set_ready(slug_full, file_id, nft_data, caption, params_json=json.dumps(params))
+        logger.info(f"[gif] {slug_full}: ✅ готово")
+
+        if inline_message_id:
+            await update_inline_message(inline_message_id, file_id, nft_data)
 
     except Exception as e:
         err_str = str(e)
         logger.warning(f"[gif] {slug_full}: attempt {attempt} failed: {err_str[:200]}")
         if attempt < 3:
-            asyncio.create_task(_retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt + 1))
+            asyncio.create_task(_retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt + 1, inline_message_id))
         else:
-            logger.error(f"[gif] {slug_full}: все 3 попытки провалились — статус error")
+            logger.error(f"[gif] {slug_full}: все 3 попытки провалились")
             await gif_db.gif_set_error(slug_full, err_str[:1000])
+            if inline_message_id:
+                await update_inline_message(inline_message_id, None, nft_data)
     finally:
         if work_dir and work_dir.exists():
-            try:
-                shutil.rmtree(work_dir, ignore_errors=True)
-            except:
-                pass
+            try: shutil.rmtree(work_dir, ignore_errors=True)
+            except: pass
 
 
-async def _retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt):
-    """v1.2.7: ретрай через 5 минут."""
+async def _retry_gif_later(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt, inline_message_id=None):
     await asyncio.sleep(300)
     logger.info(f"[gif] {slug_full}: ретрай #{attempt}")
-    try:
-        await gif_db.gif_delete(slug_full)
-    except:
-        pass
-    await generate_gif_background(slug_full, slug_short, number, nft_link, nft_data, user_id, attempt)
+    try: await gif_db.gif_delete(slug_full)
+    except: pass
+    await generate_gif_background(slug_full, slug_short, number, nft_link, nft_data, user_id, inline_message_id, attempt)
 
+
+async def update_inline_message(inline_message_id: str, mpeg4_file_id: str, nft_data: dict):
+    """Обновляет инлайн-сообщение, заменяя заглушку на готовую гифку или текст"""
+    if not inline_message_id:
+        return
+    try:
+        caption = _build_gif_caption(nft_data)
+        if mpeg4_file_id:
+            from aiogram.types import InputMediaAnimation
+            await bot.edit_message_media(
+                inline_message_id=inline_message_id,
+                media=InputMediaAnimation(media=mpeg4_file_id, caption=caption, parse_mode="HTML")
+            )
+            logger.info(f"[inline] заменена заглушка на гифку")
+        else:
+            # Если рендер не удался - меняем на текст
+            text = await build_inline_html(nft_data)
+            await bot.edit_message_text(
+                inline_message_id=inline_message_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=inline_bot_keyboard()
+            )
+            logger.info(f"[inline] заменена заглушка на текст")
+    except Exception as e:
+        logger.error(f"[inline] ошибка обновления: {e}")
 
 
 # ---------- КЛАВИАТУРЫ ----------
@@ -1261,14 +1122,11 @@ async def start_cmd(message: Message, state: FSMContext):
                     await conn.execute("UPDATE users SET referred_by=? WHERE user_id=?", (referrer_id, user_id))
                     await conn.commit()
                     await log_action(user_id, message.from_user.username or "", "referral_join", f"referrer={referrer_id}")
-        except:
-            pass
+        except: pass
 
     await update_user(message.from_user)
-    try:
-        await bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=None)
-    except:
-        pass
+    try: await bot.set_chat_menu_button(chat_id=message.chat.id, menu_button=None)
+    except: pass
     lang = await get_user_lang(user_id)
     msgs = MESSAGES[lang]
     await message.answer(msgs["start"].format(name=message.from_user.first_name), reply_markup=get_main_kb(lang))
@@ -1342,6 +1200,7 @@ async def add_deal_process_link(message: Message, state: FSMContext):
 
         slug_full, slug_short, number = _extract_slug_from_link(link)
         if slug_full and number is not None:
+            # Запускаем в фоне, человек ничего не видит
             asyncio.create_task(generate_gif_background(slug_full, slug_short, number, link, nft_data, message.from_user.id))
 
     await state.set_state(AddProfit.waiting_for_buy_amount)
@@ -1436,17 +1295,11 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
     gram_price_sell = data.get("gram_price_sell") or 0
 
     current_price = await get_gram_price()
-    if gram_price_buy <= 0:
-        gram_price_buy = current_price
-    if gram_price_sell <= 0:
-        gram_price_sell = current_price
+    if gram_price_buy <= 0: gram_price_buy = current_price
+    if gram_price_sell <= 0: gram_price_sell = current_price
 
     profit_gram = sell_amount - buy_amount - royalty
-    profit_usd = compute_profit_usd(
-        buy_amount, sell_amount, royalty,
-        gram_price_buy, gram_price_sell,
-        fallback_gram_price=gram_price_sell
-    )
+    profit_usd = compute_profit_usd(buy_amount, sell_amount, royalty, gram_price_buy, gram_price_sell, fallback_gram_price=gram_price_sell)
     date = datetime.now().strftime("%d.%m.%Y")
 
     conn = await get_db()
@@ -1458,8 +1311,7 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
            symbol, symbol_rarity, symbol_emoji_id, collection_emoji_id)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, data["category"], data["nft_link"], date, buy_amount, sell_amount, gram_price_sell,
-         gram_price_buy, gram_price_sell,
-         round(profit_gram, 4), profit_usd, royalty,
+         gram_price_buy, gram_price_sell, round(profit_gram, 4), profit_usd, royalty,
          data.get("gift_name"), data.get("model"), data.get("model_rarity"), data.get("model_emoji_id"),
          data.get("backdrop"), data.get("backdrop_rarity"), data.get("backdrop_emoji_id"),
          data.get("symbol"), data.get("symbol_rarity"), data.get("symbol_emoji_id"),
@@ -1485,8 +1337,7 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
         f"{EMOJI_DOLLAR} Курс покупки: <b>${gram_price_buy:.4f}</b>\n"
         f"{EMOJI_DOLLAR} Курс продажи: <b>${gram_price_sell:.4f}</b>"
     )
-    if attrs:
-        header = f"{header}\n{attrs}"
+    if attrs: header = f"{header}\n{attrs}"
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
 
@@ -1620,7 +1471,7 @@ async def save_pending(message: Message, state: FSMContext, royalty: float, user
 
 
 # ============================================================
-# ЗАВЕРШЕНИЕ СДЕЛКИ — с автоудалением таймеров
+# ЗАВЕРШЕНИЕ СДЕЛКИ
 # ============================================================
 @dp.message(F.text.in_(["📤 Завершить сделку", "📤 Complete Deal"]))
 async def complete_start(message: Message, state: FSMContext):
@@ -1758,11 +1609,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
     nft_link = row["nft_link"]
 
     profit_gram = sell_amount - buy_amt - royalty
-    profit_usd = compute_profit_usd(
-        buy_amt, sell_amount, royalty,
-        gram_price_buy, gram_price_sell,
-        fallback_gram_price=gram_price_sell
-    )
+    profit_usd = compute_profit_usd(buy_amt, sell_amount, royalty, gram_price_buy, gram_price_sell, fallback_gram_price=gram_price_sell)
 
     nft_data = {
         "gift_name": row["gift_name"] if "gift_name" in row.keys() else None,
@@ -1779,8 +1626,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
     }
     if not nft_data["model"] and nft_link:
         fresh = await parse_nft_link(nft_link)
-        if fresh:
-            nft_data = fresh
+        if fresh: nft_data = fresh
 
     await conn.execute(
         """INSERT INTO sales (user_id, category, nft_link, date, buy_amount, sell_amount, gram_price,
@@ -1790,8 +1636,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
            symbol, symbol_rarity, symbol_emoji_id, collection_emoji_id)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (user_id, row["category"], nft_link, row["date"], buy_amt, sell_amount, gram_price_sell,
-         gram_price_buy, gram_price_sell,
-         round(profit_gram, 4), profit_usd, royalty,
+         gram_price_buy, gram_price_sell, round(profit_gram, 4), profit_usd, royalty,
          nft_data.get("gift_name"), nft_data.get("model"), nft_data.get("model_rarity"), nft_data.get("model_emoji_id"),
          nft_data.get("backdrop"), nft_data.get("backdrop_rarity"), nft_data.get("backdrop_emoji_id"),
          nft_data.get("symbol"), nft_data.get("symbol_rarity"), nft_data.get("symbol_emoji_id"),
@@ -1823,10 +1668,8 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
         f"{EMOJI_DOLLAR} Курс продажи: <b>${gram_price_sell:.4f}</b>\n"
         f"{EMOJI_DOLLAR} Прибыль в USD: <b>{profit_usd:+.2f}$</b>"
     )
-    if attrs:
-        header = f"{header}\n{attrs}"
-    if deleted_timers > 0:
-        text += f"\n\n⏰ Удалено таймеров: {deleted_timers}"
+    if attrs: header = f"{header}\n{attrs}"
+    if deleted_timers > 0: text += f"\n\n⏰ Удалено таймеров: {deleted_timers}"
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
 
@@ -1851,10 +1694,8 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
     pending_id = data.get("delete_pending_id")
     lang = await get_user_lang(callback.from_user.id)
     if not pending_id:
-        try:
-            await callback.message.edit_text(MESSAGES[lang]["cancelled"])
-        except:
-            await callback.message.answer(MESSAGES[lang]["cancelled"])
+        try: await callback.message.edit_text(MESSAGES[lang]["cancelled"])
+        except: await callback.message.answer(MESSAGES[lang]["cancelled"])
         await state.clear()
         return
 
@@ -1869,13 +1710,9 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
     await state.clear()
     await log_action(callback.from_user.id, callback.from_user.username or "", "delete_pending", f"id={pending_id}, timers={deleted_timers}")
     text = f"{MESSAGES[lang]['deleted']}"
-    if deleted_timers > 0:
-        text += f"\n⏰ Удалено таймеров: {deleted_timers}"
-    try:
-        await callback.message.edit_text(text)
-    except:
-        await callback.message.answer(text)
-
+    if deleted_timers > 0: text += f"\n⏰ Удалено таймеров: {deleted_timers}"
+    try: await callback.message.edit_text(text)
+    except: await callback.message.answer(text)
 
 # ---------- РЕДАКТИРОВАНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
@@ -1994,11 +1831,7 @@ async def finalize_edit(message: Message, state: FSMContext, royalty: float, use
     new_gram_price_sell = data.get("new_gram_price_sell") or new_gram_price_buy
 
     profit_gram = new_sell - new_buy - royalty
-    profit_usd = compute_profit_usd(
-        new_buy, new_sell, royalty,
-        new_gram_price_buy, new_gram_price_sell,
-        fallback_gram_price=new_gram_price_sell
-    )
+    profit_usd = compute_profit_usd(new_buy, new_sell, royalty, new_gram_price_buy, new_gram_price_sell, fallback_gram_price=new_gram_price_sell)
 
     conn = await get_db()
     has_nft = any(k in data for k in ("model", "backdrop", "symbol", "gift_name"))
@@ -2065,10 +1898,8 @@ async def confirm_delete(callback: CallbackQuery, state: FSMContext):
     deal_id = data.get("delete_deal_id")
     lang = await get_user_lang(callback.from_user.id)
     if not deal_id:
-        try:
-            await callback.message.edit_text(MESSAGES[lang]["cancelled"])
-        except:
-            await callback.message.answer(MESSAGES[lang]["cancelled"])
+        try: await callback.message.edit_text(MESSAGES[lang]["cancelled"])
+        except: await callback.message.answer(MESSAGES[lang]["cancelled"])
         await state.clear()
         return
     conn = await get_db()
@@ -2076,11 +1907,8 @@ async def confirm_delete(callback: CallbackQuery, state: FSMContext):
     await conn.commit()
     await state.clear()
     await log_action(callback.from_user.id, callback.from_user.username or "", "delete_sale", f"id={deal_id}")
-    try:
-        await callback.message.edit_text(MESSAGES[lang]["deleted"])
-    except:
-        await callback.message.answer(MESSAGES[lang]["deleted"])
-
+    try: await callback.message.edit_text(MESSAGES[lang]["deleted"])
+    except: await callback.message.answer(MESSAGES[lang]["deleted"])
 
 
 # ---------- ИСТОРИЯ ----------
@@ -2358,20 +2186,16 @@ async def stats_chart(callback: CallbackQuery):
 @dp.callback_query(F.data == "stats_back")
 async def stats_back(callback: CallbackQuery):
     await safe_answer(callback)
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    try: await callback.message.delete()
+    except: pass
     await show_stats_dashboard(callback.message, callback.from_user.id)
 
 
 @dp.callback_query(F.data == "close_stats")
 async def close_stats(callback: CallbackQuery):
     await safe_answer(callback)
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    try: await callback.message.delete()
+    except: pass
 
 
 # ---------- КАЛЬКУЛЯТОР ----------
@@ -2534,8 +2358,7 @@ async def successful_payment(message: Message):
                     date=datetime.now().strftime('%d.%m.%Y %H:%M')
                 )
             )
-        except:
-            pass
+        except: pass
 
 
 @dp.callback_query(F.data == "donate_top")
@@ -2557,12 +2380,9 @@ async def donate_top(callback: CallbackQuery):
     text = MESSAGES[lang]["donate_top_title"] + "\n\n"
     for i, (uid, total, username, first_name) in enumerate(rows, 1):
         emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        if username:
-            name = f"@{username}"
-        elif first_name:
-            name = first_name
-        else:
-            name = f"ID {uid}"
+        if username: name = f"@{username}"
+        elif first_name: name = first_name
+        else: name = f"ID {uid}"
         text += f"{emoji} {name} — {total} ⭐\n"
     await callback.message.answer(text)
 
@@ -2664,10 +2484,8 @@ async def timer_days_process(message: Message, state: FSMContext):
 @dp.message(Command("reports"))
 async def reports_menu(message: Message, state: FSMContext = None):
     if state is not None:
-        try:
-            await state.clear()
-        except:
-            pass
+        try: await state.clear()
+        except: pass
     lang = await get_user_lang(message.from_user.id)
     msgs = MESSAGES[lang]
     conn = await get_db()
@@ -2711,7 +2529,6 @@ async def settings(message: Message):
     cur = await conn.execute("SELECT goal_gram FROM profit_goals WHERE user_id=?", (user_id,))
     goal_row = await cur.fetchone()
     goal = goal_row[0] if goal_row else None
-
     show_usd = await get_user_show_usd(user_id)
 
     msgs = MESSAGES[lang]
@@ -2723,10 +2540,7 @@ async def settings(message: Message):
     text += f"💵 Показывать в USD: <b>{'✅ вкл' if show_usd else '❌ выкл'}</b>"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=f"💵 Показывать в USD: {'✅' if show_usd else '❌'}",
-            callback_data="toggle_show_usd"
-        )],
+        [InlineKeyboardButton(text=f"💵 Показывать в USD: {'✅' if show_usd else '❌'}", callback_data="toggle_show_usd")],
         [InlineKeyboardButton(text=msgs["settings_change_commission"], callback_data="set_royalty")],
         [InlineKeyboardButton(text=msgs["settings_set_goal"], callback_data="set_goal")],
         [InlineKeyboardButton(text=msgs["settings_star_rate_btn"], callback_data="set_star_rate")],
@@ -2745,20 +2559,16 @@ async def toggle_show_usd_cb(callback: CallbackQuery):
     current = await get_user_show_usd(uid)
     await set_user_show_usd(uid, not current)
     await log_action(uid, callback.from_user.username or "", "toggle_show_usd", f"{not current}")
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    try: await callback.message.delete()
+    except: pass
     await settings(callback.message)
 
 
 @dp.callback_query(F.data == "close_settings")
 async def close_settings(callback: CallbackQuery):
     await safe_answer(callback)
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    try: await callback.message.delete()
+    except: pass
 
 
 @dp.callback_query(F.data == "open_reports")
@@ -2932,41 +2742,28 @@ async def cancel_deal(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
     await state.clear()
     lang = await get_user_lang(callback.from_user.id)
-    try:
-        await callback.message.edit_text(MESSAGES[lang]["cancelled"])
-    except:
-        await callback.message.answer(MESSAGES[lang]["cancelled"])
+    try: await callback.message.edit_text(MESSAGES[lang]["cancelled"])
+    except: await callback.message.answer(MESSAGES[lang]["cancelled"])
 
 
 @dp.callback_query(F.data == "goal_later")
 async def goal_later(callback: CallbackQuery):
     await safe_answer(callback)
-    try:
-        await callback.message.delete()
-    except:
-        pass
-
+    try: await callback.message.delete()
+    except: pass
 
 
 # ============================================================
-# ИНЛАЙН-РЕЖИМ
-# v1.2.7:
-#   - только сделки
-#   - ready → MP4 с caption
-#   - pending → Article с "⏳ Гифка генерируется"
-#   - error/нет → Article с нормальным текстом (без гифки)
+# ИНЛАЙН-РЕЖИМ (С ЗАГЛУШКАМИ И ПРЕМИУМ-ЭМОДЗИ)
 # ============================================================
 def _esc(s):
-    if s is None:
-        return ""
+    if s is None: return ""
     return html.escape(str(s))
 
 
 def inline_bot_keyboard(user_id: int = None):
-    if user_id:
-        url = f"{BOT_URL}?start=ref_{user_id}"
-    else:
-        url = BOT_URL
+    if user_id: url = f"{BOT_URL}?start=ref_{user_id}"
+    else: url = BOT_URL
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🚀 Открыть бота", url=url)]
     ])
@@ -2976,36 +2773,23 @@ async def build_inline_html(deal: dict) -> str:
     gift_name = deal.get('gift_name') or deal.get('category') or 'NFT'
     profit = deal.get('profit_gram') or 0
     profit_usd = deal.get('profit_usd') or 0
-
     gp_buy = deal.get('gram_price_buy') or 0
     gp_sell = deal.get('gram_price_sell') or deal.get('gram_price') or 0
-
     collection_emoji = get_collection_emoji_html(deal)
 
     lines = [f"{collection_emoji} <b>{_esc(gift_name)}</b> · Сделка #{deal['id']}"]
-
     attrs = format_gift_attributes({
-        "model": deal.get("model"),
-        "model_rarity": deal.get("model_rarity"),
-        "model_emoji_id": deal.get("model_emoji_id"),
-        "backdrop": deal.get("backdrop"),
-        "backdrop_rarity": deal.get("backdrop_rarity"),
-        "backdrop_emoji_id": deal.get("backdrop_emoji_id"),
-        "symbol": deal.get("symbol"),
-        "symbol_rarity": deal.get("symbol_rarity"),
-        "symbol_emoji_id": deal.get("symbol_emoji_id"),
+        "model": deal.get("model"), "model_rarity": deal.get("model_rarity"), "model_emoji_id": deal.get("model_emoji_id"),
+        "backdrop": deal.get("backdrop"), "backdrop_rarity": deal.get("backdrop_rarity"), "backdrop_emoji_id": deal.get("backdrop_emoji_id"),
+        "symbol": deal.get("symbol"), "symbol_rarity": deal.get("symbol_rarity"), "symbol_emoji_id": deal.get("symbol_emoji_id"),
     })
     if attrs:
-        lines.append("")
-        lines.append(attrs)
-
-    lines.append("")
-    lines.append(f"{EMOJI_DIAMOND} {deal['buy_amount']} → {deal['sell_amount']} GRAM")
+        lines.append(""); lines.append(attrs)
+    lines.append(""); lines.append(f"{EMOJI_DIAMOND} {deal['buy_amount']} → {deal['sell_amount']} GRAM")
 
     deal_user_id = deal.get("user_id")
     show_usd = True
-    if deal_user_id:
-        show_usd = await get_user_show_usd(deal_user_id)
+    if deal_user_id: show_usd = await get_user_show_usd(deal_user_id)
 
     if show_usd and gp_buy and gp_sell and gp_buy != gp_sell:
         lines.append(f"{EMOJI_DOLLAR} Курс: ${gp_buy:.4f} → ${gp_sell:.4f}")
@@ -3013,25 +2797,17 @@ async def build_inline_html(deal: dict) -> str:
         lines.append(f"{EMOJI_DOLLAR} Курс: ${gp_sell or gp_buy:.4f}")
 
     lines.append(f"{EMOJI_MONEY} <b>{profit:+.4f} GRAM</b>")
-    if show_usd:
-        lines.append(f"{EMOJI_DOLLAR} <b>{profit_usd:+.2f}$</b>")
+    if show_usd: lines.append(f"{EMOJI_DOLLAR} <b>{profit_usd:+.2f}$</b>")
 
     if deal.get('nft_link'):
-        lines.append("")
-        lines.append(f'{EMOJI_LINK} <a href="{_esc(deal["nft_link"])}">Открыть NFT</a>')
-
+        lines.append(""); lines.append(f'{EMOJI_LINK} <a href="{_esc(deal["nft_link"])}">Открыть NFT</a>')
     return "\n".join(lines)
-
-
-async def build_inline_plain(deal: dict, lang: str = "ru") -> str:
-    return await build_inline_html(deal)
 
 
 @dp.inline_query()
 async def inline_query(inline_query):
     uid = inline_query.from_user.id
     query = (inline_query.query or "").strip()
-
     results = []
 
     conn = await get_db()
@@ -3044,6 +2820,8 @@ async def inline_query(inline_query):
         )
     rows = await cur.fetchall()
     deals = [dict(row) for row in rows]
+
+    placeholder_id = GLOBAL_SETTINGS.get("sticker_file_id")
 
     for deal_dict in deals:
         gift_name = deal_dict.get('gift_name') or deal_dict.get('category') or 'NFT'
@@ -3058,10 +2836,8 @@ async def inline_query(inline_query):
             gif_status = gif_row.get("status") if gif_row else None
 
         if gif_status == "ready" and gif_row and gif_row.get("mpeg4_file_id"):
-            # v1.2.7: MP4 с caption
             caption = await build_inline_html(deal_dict)
-            if len(caption) > 1024:
-                caption = caption[:1020] + "…"
+            if len(caption) > 1024: caption = caption[:1020] + "…"
             results.append(InlineQueryResultCachedMpeg4Gif(
                 id=f"deal_gif_{deal_dict['id']}",
                 mpeg4_file_id=gif_row["mpeg4_file_id"],
@@ -3070,19 +2846,23 @@ async def inline_query(inline_query):
                 parse_mode="HTML",
                 reply_markup=inline_bot_keyboard(user_id=uid)
             ))
+        elif placeholder_id:
+            caption = await build_inline_html(deal_dict)
+            if len(caption) > 1024: caption = caption[:1020] + "…"
+            results.append(InlineQueryResultCachedMpeg4Gif(
+                id=f"deal_placeholder_{deal_dict['id']}",
+                mpeg4_file_id=placeholder_id,
+                title=f"#{deal_dict['id']} {gift_name} (⏳ Рендер...)",
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=inline_bot_keyboard(user_id=uid)
+            ))
         else:
-            # v1.2.7: Article со статусом
-            plain = await build_inline_plain(deal_dict)
-            if gif_status == "pending":
-                status_icon = "⏳"
-                status_desc = "⏳ Гифка генерируется… (30–120 сек)"
-            else:
-                status_icon = "📄"
-                status_desc = f"Куплено: {deal_dict['buy_amount']} → Продано: {deal_dict['sell_amount']} GRAM"
-
+            plain = await build_inline_html(deal_dict)
+            status_desc = "⏳ Гифка генерируется..." if gif_status == "pending" else "Гифка недоступна"
             results.append(InlineQueryResultArticle(
                 id=f"sale_{deal_dict['id']}",
-                title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM / {profit_usd:+.2f}$) {status_icon}",
+                title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM / {profit_usd:+.2f}$)",
                 description=status_desc,
                 input_message_content=InputTextMessageContent(message_text=plain, parse_mode="HTML"),
                 reply_markup=inline_bot_keyboard(user_id=uid)
@@ -3112,20 +2892,35 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     if not chosen.inline_message_id:
         return
 
-    if chosen.result_id.startswith("deal_gif_") or chosen.result_id.startswith("gif_"):
+    if chosen.result_id.startswith("deal_gif_") or chosen.result_id.startswith("gif_") or chosen.result_id.startswith("deal_placeholder_"):
         uid = chosen.from_user.id
         conn = await get_db()
         try:
+            deal_id = 0
+            if chosen.result_id.startswith("deal_gif_"): deal_id = int(chosen.result_id.split("_")[-1])
+            elif chosen.result_id.startswith("deal_placeholder_"): deal_id = int(chosen.result_id.split("_")[-1])
+
             await conn.execute(
                 "INSERT INTO inline_stats (user_id, username, first_name, deal_id) VALUES (?,?,?,?)",
-                (uid, chosen.from_user.username or "", chosen.from_user.first_name or "", 0)
+                (uid, chosen.from_user.username or "", chosen.from_user.first_name or "", deal_id)
             )
-            await conn.execute(
-                "DELETE FROM inline_stats WHERE id NOT IN (SELECT id FROM inline_stats ORDER BY id DESC LIMIT 500)"
-            )
+            await conn.execute("DELETE FROM inline_stats WHERE id NOT IN (SELECT id FROM inline_stats ORDER BY id DESC LIMIT 500)")
             await conn.commit()
         except Exception as e:
             logger.error(f"gif inline stats error: {e}")
+
+        if chosen.result_id.startswith("deal_placeholder_"):
+            deal_id = int(chosen.result_id.split("_")[-1])
+            cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (deal_id, uid))
+            row = await cur.fetchone()
+            if row:
+                deal_dict = dict(row)
+                slug_full, slug_short, number = _extract_slug_from_link(deal_dict.get("nft_link") or "")
+                if slug_full and number is not None:
+                    asyncio.create_task(generate_gif_background(
+                        slug_full, slug_short, number, deal_dict.get("nft_link"), deal_dict, uid,
+                        inline_message_id=chosen.inline_message_id
+                    ))
         return
 
     if not chosen.result_id.startswith("sale_"):
@@ -3139,8 +2934,7 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     conn = await get_db()
     cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=?", (deal_id, uid))
     row = await cur.fetchone()
-    if not row:
-        return
+    if not row: return
     deal_dict = dict(row)
 
     try:
@@ -3148,9 +2942,7 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
             "INSERT INTO inline_stats (user_id, username, first_name, deal_id) VALUES (?,?,?,?)",
             (uid, chosen.from_user.username or "", chosen.from_user.first_name or "", deal_id)
         )
-        await conn.execute(
-            "DELETE FROM inline_stats WHERE id NOT IN (SELECT id FROM inline_stats ORDER BY id DESC LIMIT 500)"
-        )
+        await conn.execute("DELETE FROM inline_stats WHERE id NOT IN (SELECT id FROM inline_stats ORDER BY id DESC LIMIT 500)")
         await conn.commit()
     except Exception as e:
         logger.error(f"inlinestats error: {e}")
@@ -3163,10 +2955,8 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
                 parse_mode="HTML",
                 reply_markup=inline_bot_keyboard(user_id=uid)
             )
-            logger.info(f"Инлайн-сообщение для сделки #{deal_id} отредактировано")
             break
         except Exception as e:
-            logger.warning(f"Попытка {i+1}: {e}")
             await asyncio.sleep(0.3)
 
 
@@ -3176,10 +2966,8 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message, state: FSMContext = None):
     if state is not None:
-        try:
-            await state.clear()
-        except:
-            pass
+        try: await state.clear()
+        except: pass
     if not await is_admin(message.from_user.id):
         return await message.answer("⛔ Доступ запрещён")
     await show_admin_panel(message)
@@ -3205,6 +2993,7 @@ async def show_admin_panel(message: Message):
         f"👑 Администраторов: {admin_count}\n"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎬 Настройки качества гиф", callback_data="admin_gif_settings")],
         [InlineKeyboardButton(text="🎬 Генерация гиф", callback_data="admin_gif_panel")],
         [InlineKeyboardButton(text="📊 Расширенная статистика", callback_data="admin_ext_stats")],
         [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
@@ -3224,29 +3013,139 @@ async def show_admin_panel(message: Message):
 @dp.callback_query(F.data == "admin_panel")
 async def admin_panel_back(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    try:
-        await callback.message.delete()
-    except:
-        pass
+    if not await is_admin(callback.from_user.id): return
+    try: await callback.message.delete()
+    except: pass
     await show_admin_panel(callback.message)
 
 
 @dp.callback_query(F.data == "close_admin")
 async def close_admin(callback: CallbackQuery):
     await safe_answer(callback)
+    try: await callback.message.delete()
+    except: pass
+
+
+# ============================================================
+# НАСТРОЙКИ КАЧЕСТВА ГИФ (ТОЛЬКО ГЛАВНЫЙ АДМИН)
+# ============================================================
+@dp.callback_query(F.data == "admin_gif_settings")
+async def admin_gif_settings_panel(callback: CallbackQuery):
+    await safe_answer(callback)
+    if callback.from_user.id != ADMIN_IDS[0]:
+        return await callback.answer("⛔ Только главный администратор может менять настройки.", show_alert=True)
+
+    text = (
+        "⚙️ <b>Глобальные настройки качества гиф</b>\n\n"
+        "Эти настройки применяются ко <b>всем</b> новым гифкам.\n"
+        "Старые гифки останутся прежними (перегенерируй их вручную, если нужно).\n\n"
+        f"📐 Ширина: <b>{GLOBAL_SETTINGS.get('card_w', 800)}</b> px\n"
+        f"📐 Высота: <b>{GLOBAL_SETTINGS.get('card_h', 450)}</b> px\n"
+        f"🎞 FPS: <b>{GLOBAL_SETTINGS.get('fps', 24)}</b>\n"
+        f"⏭ Пропуск кадров: <b>{GLOBAL_SETTINGS.get('frame_skip', 2)}</b>\n"
+        f"🎨 CRF (качество): <b>{GLOBAL_SETTINGS.get('crf', 23)}</b> (меньше = лучше)\n"
+        f"⚡ Preset: <b>{GLOBAL_SETTINGS.get('preset', 'veryfast')}</b>\n\n"
+        f"🖼 Заглушка: <b>{'Установлена' if GLOBAL_SETTINGS.get('sticker_file_id') else 'Не установлена'}</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📐 Ширина", callback_data="gif_setting_card_w"),
+         InlineKeyboardButton(text="📐 Высота", callback_data="gif_setting_card_h")],
+        [InlineKeyboardButton(text="🎞 FPS", callback_data="gif_setting_fps"),
+         InlineKeyboardButton(text="⏭ Пропуск кадров", callback_data="gif_setting_frame_skip")],
+        [InlineKeyboardButton(text="🎨 CRF (качество)", callback_data="gif_setting_crf"),
+         InlineKeyboardButton(text="⚡ Preset", callback_data="gif_setting_preset")],
+        [InlineKeyboardButton(text="🖼 Загрузить заглушку", callback_data="gif_setting_placeholder")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")],
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+
+
+@dp.callback_query(F.data.startswith("gif_setting_"))
+async def gif_setting_edit(callback: CallbackQuery, state: FSMContext):
+    await safe_answer(callback)
+    if callback.from_user.id != ADMIN_IDS[0]: return
+
+    field = callback.data.replace("gif_setting_", "")
+    if field == "placeholder":
+        await state.set_state(AdminGifSettings.waiting_for_placeholder)
+        await callback.message.answer("🖼 Отправь короткое видео (MP4) или гифку, которая будет использоваться как заглушка:")
+        return
+
+    hints = {
+        "card_w": "Ширина видео (рекомендуется 800)",
+        "card_h": "Высота видео (рекомендуется 450)",
+        "fps": "Кадров в секунду (рекомендуется 24)",
+        "frame_skip": "Пропуск кадров (1 = все кадры, 2 = каждый второй. Рекомендуется 2)",
+        "crf": "Качество (18 - отличное, 23 - хорошее, 28 - быстрое)",
+        "preset": "Скорость кодирования (ultrafast, veryfast, fast, medium, slow)"
+    }
+
+    await state.set_state(AdminGifSettings.waiting_for_value)
+    await state.update_data(setting_field=field)
+    await callback.message.answer(
+        f"⚙️ Введи новое значение для <b>{field}</b>.\n\n"
+        f"💡 Подсказка: {hints.get(field, '')}",
+        reply_markup=get_cancel_kb("ru")
+    )
+
+
+@dp.message(AdminGifSettings.waiting_for_value)
+async def gif_setting_save(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_IDS[0]: return
+    data = await state.get_data()
+    field = data.get("setting_field")
+    val = message.text.strip()
+
     try:
-        await callback.message.delete()
-    except:
-        pass
+        if field in ["card_w", "card_h", "fps", "frame_skip", "crf"]:
+            val = int(val)
+        await gif_db.save_bot_setting(field, val)
+        await load_global_settings()
+        await state.clear()
+        await message.answer(
+            f"✅ Настройка <b>{field}</b> изменена на <code>{val}</code>",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К настройкам", callback_data="admin_gif_settings")]
+            ])
+        )
+    except ValueError:
+        await message.answer("❌ Введите корректное число.")
 
 
+@dp.message(AdminGifSettings.waiting_for_placeholder, F.animation | F.video | F.document)
+async def gif_set_placeholder_save(message: Message, state: FSMContext):
+    if message.from_user.id != ADMIN_IDS[0]: return
+    file_id = None
+    if message.animation:
+        file_id = message.animation.file_id
+    elif message.video:
+        file_id = message.video.file_id
+    elif message.document and message.document.mime_type == "video/mp4":
+        file_id = message.document.file_id
+
+    if not file_id:
+        await message.answer("❌ Это не видео/гифка. Отправь MP4 файл.")
+        return
+
+    await gif_db.save_bot_setting("sticker_file_id", file_id)
+    await load_global_settings()
+    await state.clear()
+    await message.answer(
+        "✅ Заглушка успешно установлена!",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К настройкам", callback_data="admin_gif_settings")]
+        ])
+    )
+
+
+# ============================================================
+# ОСТАЛЬНЫЕ ХЭНДЛЕРЫ АДМИНКИ (Продолжение)
+# ============================================================
 @dp.callback_query(F.data == "admin_users")
 async def admin_users(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     cur = await conn.execute("SELECT user_id, username, first_name, last_name FROM users ORDER BY joined_date DESC LIMIT 20")
     rows = await cur.fetchall()
@@ -3263,8 +3162,7 @@ async def admin_users(callback: CallbackQuery):
 @dp.callback_query(F.data == "admin_ext_stats")
 async def admin_ext_stats(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     await show_extended_stats(callback.message)
 
 
@@ -3272,76 +3170,46 @@ async def show_extended_stats(message: Message):
     conn = await get_db()
     now = datetime.now()
     today = now.strftime("%d.%m.%Y")
-
     cur = await conn.execute("SELECT COUNT(*) FROM users")
     total_users = (await cur.fetchone())[0]
     cur = await conn.execute("SELECT COUNT(*) FROM users WHERE joined_date >= ?", (today,))
     new_today = (await cur.fetchone())[0]
     cur = await conn.execute("SELECT COUNT(DISTINCT user_id) FROM sales WHERE date = ?", (today,))
     active_today = (await cur.fetchone())[0]
-
     cur = await conn.execute("SELECT COUNT(*), AVG(profit_gram), AVG(buy_amount) FROM sales")
     total_deals, avg_profit, avg_check = await cur.fetchone()
     cur = await conn.execute("SELECT COUNT(*) FROM sales WHERE date = ?", (today,))
     today_deals = (await cur.fetchone())[0]
     cur = await conn.execute("SELECT COUNT(*) FROM sales WHERE created_at >= datetime(?, 'unixepoch')", (time.time() - 7*86400,))
     week_deals = (await cur.fetchone())[0]
-
     cur = await conn.execute("SELECT SUM(profit_gram), SUM(profit_usd) FROM sales")
     total_g, total_u = await cur.fetchone()
     cur = await conn.execute("SELECT date, SUM(profit_gram) as s FROM sales GROUP BY date ORDER BY s DESC LIMIT 1")
     best_row = await cur.fetchone()
-
     cur = await conn.execute("SELECT category, COUNT(*) FROM sales GROUP BY category ORDER BY COUNT(*) DESC LIMIT 5")
     top_cols = await cur.fetchall()
-
     cur = await conn.execute("SELECT user_id, COUNT(*) FROM sales GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 5")
     top_users = await cur.fetchall()
-
     cur = await conn.execute("SELECT COUNT(DISTINCT user_id), COUNT(*) FROM inline_stats")
     inl_row = await cur.fetchone()
 
     text = "📊 <b>Расширенная статистика</b>\n\n"
     text += "━━━ 👥 ПОЛЬЗОВАТЕЛИ ━━━\n"
-    text += f"• Всего: {total_users}\n"
-    text += f"• Новых сегодня: {new_today}\n"
-    text += f"• Активных сегодня: {active_today}\n\n"
-
+    text += f"• Всего: {total_users}\n• Новых сегодня: {new_today}\n• Активных сегодня: {active_today}\n\n"
     text += "━━━ 📈 СДЕЛКИ ━━━\n"
-    text += f"• Всего: {total_deals or 0}\n"
-    text += f"• Сегодня: {today_deals}\n"
-    text += f"• За неделю: {week_deals}\n"
-    text += f"• Средняя прибыль: {avg_profit or 0:+.4f} GRAM\n"
-    text += f"• Средний чек: {avg_check or 0:.2f} GRAM\n\n"
-
+    text += f"• Всего: {total_deals or 0}\n• Сегодня: {today_deals}\n• За неделю: {week_deals}\n"
+    text += f"• Средняя прибыль: {avg_profit or 0:+.4f} GRAM\n• Средний чек: {avg_check or 0:.2f} GRAM\n\n"
     text += "━━━ 💰 ПРИБЫЛЬ ━━━\n"
-    text += f"• TON: {total_g or 0:+.4f} GRAM\n"
-    text += f"• USD: ${total_u or 0:+.2f}\n"
-    if best_row:
-        text += f"• Лучший день: {_esc(best_row[0])} ({best_row[1]:+.2f} GRAM)\n"
-    text += "\n"
-
-    text += "━━━ 📁 ТОП-5 КОЛЛЕКЦИЙ ━━━\n"
-    for i, (cat, cnt) in enumerate(top_cols, 1):
-        text += f"{i}. {_esc(cat)} — {cnt} сделок\n"
-    text += "\n"
-
-    text += "━━━ 👑 ТОП-5 ЮЗЕРОВ ━━━\n"
+    text += f"• TON: {total_g or 0:+.4f} GRAM\n• USD: ${total_u or 0:+.2f}\n"
+    if best_row: text += f"• Лучший день: {_esc(best_row[0])} ({best_row[1]:+.2f} GRAM)\n"
+    text += "\n━━━ 📁 ТОП-5 КОЛЛЕКЦИЙ ━━━\n"
+    for i, (cat, cnt) in enumerate(top_cols, 1): text += f"{i}. {_esc(cat)} — {cnt} сделок\n"
+    text += "\n━━━ 👑 ТОП-5 ЮЗЕРОВ ━━━\n"
     for i, (uid, cnt) in enumerate(top_users, 1):
         cur2 = await conn.execute("SELECT username, first_name FROM users WHERE user_id=?", (uid,))
         urow = await cur2.fetchone()
-        if urow and urow[0]:
-            name = f"@{_esc(urow[0])}"
-        elif urow and urow[1]:
-            name = _esc(urow[1])
-        else:
-            name = f"ID {uid}"
+        name = f"@{_esc(urow[0])}" if urow and urow[0] else (_esc(urow[1]) if urow and urow[1] else f"ID {uid}")
         text += f"{i}. {name} — {cnt} сделок\n"
-
-    if inl_row:
-        text += f"\n━━━ 📱 ИНЛАЙН-РЕЖИМ ━━━\n"
-        text += f"• Уникальных: {inl_row[0]}\n"
-        text += f"• Всего отправок: {inl_row[1]}\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📅 По дням", callback_data="adm_stats_days"),
@@ -3354,16 +3222,12 @@ async def show_extended_stats(message: Message):
 @dp.callback_query(F.data == "adm_stats_days")
 async def adm_stats_days(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
-    cur = await conn.execute(
-        "SELECT date, COUNT(*), SUM(profit_gram) FROM sales GROUP BY date ORDER BY id DESC LIMIT 7"
-    )
+    cur = await conn.execute("SELECT date, COUNT(*), SUM(profit_gram) FROM sales GROUP BY date ORDER BY id DESC LIMIT 7")
     rows = await cur.fetchall()
     text = "📅 <b>Статистика по дням</b>\n\n"
-    for r in reversed(rows):
-        text += f"• {_esc(r[0])}: {r[1]} сделок, {r[2] or 0:+.4f} GRAM\n"
+    for r in reversed(rows): text += f"• {_esc(r[0])}: {r[1]} сделок, {r[2] or 0:+.4f} GRAM\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_ext_stats")]])
     await callback.message.edit_text(text, reply_markup=kb)
 
@@ -3371,16 +3235,12 @@ async def adm_stats_days(callback: CallbackQuery):
 @dp.callback_query(F.data == "adm_stats_hours")
 async def adm_stats_hours(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
-    cur = await conn.execute(
-        "SELECT CAST(strftime('%H', created_at) AS INTEGER) AS h, COUNT(*) FROM sales GROUP BY h ORDER BY h"
-    )
+    cur = await conn.execute("SELECT CAST(strftime('%H', created_at) AS INTEGER) AS h, COUNT(*) FROM sales GROUP BY h ORDER BY h")
     rows = await cur.fetchall()
     text = "📈 <b>Статистика по часам</b>\n\n"
-    for r in rows:
-        text += f"• {r[0]:02d}:00 — {r[1]} сделок\n"
+    for r in rows: text += f"• {r[0]:02d}:00 — {r[1]} сделок\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_ext_stats")]])
     await callback.message.edit_text(text, reply_markup=kb)
 
@@ -3388,57 +3248,27 @@ async def adm_stats_hours(callback: CallbackQuery):
 @dp.callback_query(F.data == "admin_inline_stats")
 async def admin_inline_stats(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
-
     cur = await conn.execute("SELECT COUNT(DISTINCT user_id), COUNT(*) FROM inline_stats")
     users, total = await cur.fetchone()
     if not total:
         await callback.message.answer("📈 Инлайн-режимом пока никто не пользовался.")
         return
-
-    cur = await conn.execute(
-        "SELECT user_id, username, first_name, COUNT(*) FROM inline_stats GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10"
-    )
+    cur = await conn.execute("SELECT user_id, username, first_name, COUNT(*) FROM inline_stats GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10")
     top = await cur.fetchall()
-
-    cur = await conn.execute(
-        "SELECT user_id, username, first_name, deal_id, timestamp FROM inline_stats ORDER BY id DESC LIMIT 10"
-    )
-    recent = await cur.fetchall()
-
     text = "📈 <b>Инлайн-статистика</b>\n\n"
-    text += f"👥 Уникальных пользователей: {users}\n"
-    text += f"📤 Всего отправок: {total}\n"
-    text += "\n🏆 <b>Топ-10 активных:</b>\n"
+    text += f"👥 Уникальных пользователей: {users}\n📤 Всего отправок: {total}\n\n🏆 <b>Топ-10 активных:</b>\n"
     for i, (uid, uname, fname, cnt) in enumerate(top, 1):
-        if uname:
-            name = f"@{_esc(uname)}"
-        elif fname:
-            name = _esc(fname)
-        else:
-            name = f"ID {uid}"
+        name = f"@{_esc(uname)}" if uname else (_esc(fname) if fname else f"ID {uid}")
         text += f"{i}. {name} — {cnt} отправок\n"
-
-    text += "\n📅 <b>Последние 10 отправок:</b>\n"
-    for (uid, uname, fname, deal_id, ts) in recent:
-        if uname:
-            name = f"@{_esc(uname)}"
-        elif fname:
-            name = _esc(fname)
-        else:
-            name = f"ID {uid}"
-        text += f"• {name} — сделка #{deal_id} — {_esc(str(ts)[:16])}\n"
-
     await callback.message.answer(text)
 
 
 @dp.callback_query(F.data == "admin_logs")
 async def admin_logs(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     cur = await conn.execute("SELECT user_id, username, action, details, timestamp FROM action_logs ORDER BY id DESC LIMIT 20")
     rows = await cur.fetchall()
@@ -3447,14 +3277,10 @@ async def admin_logs(callback: CallbackQuery):
         return
     text = "📋 <b>Логи действий</b> (последние 20)\n\n"
     for (uid, uname, action, details, ts) in rows:
-        if uname:
-            name = f"@{_esc(uname)}"
-        else:
-            name = f"ID {uid}"
+        name = f"@{_esc(uname)}" if uname else f"ID {uid}"
         time_str = _esc(str(ts)[11:16]) if ts else ""
         text += f"🕐 {time_str} — {name} — {_esc(action)}\n"
-        if details:
-            text += f"   <i>{_esc(details)[:200]}</i>\n"
+        if details: text += f"   <i>{_esc(details)[:200]}</i>\n"
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Очистить лог", callback_data="logs_clear")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
@@ -3465,8 +3291,7 @@ async def admin_logs(callback: CallbackQuery):
 @dp.callback_query(F.data == "logs_clear")
 async def logs_clear(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     await conn.execute("DELETE FROM action_logs")
     await conn.commit()
@@ -3476,12 +3301,7 @@ async def logs_clear(callback: CallbackQuery):
 @dp.callback_query(F.data == "admin_errors")
 async def admin_errors(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    await show_errors_menu(callback.message)
-
-
-async def show_errors_menu(message: Message):
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     cur = await conn.execute("SELECT COUNT(*) FROM error_logs")
     total = (await cur.fetchone())[0]
@@ -3494,100 +3314,26 @@ async def show_errors_menu(message: Message):
     if total == 0:
         text = "🚨 <b>Лог ошибок</b>\n\n✅ Ошибок нет. Всё работает стабильно."
         kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]])
-        await message.answer(text, reply_markup=kb)
+        await callback.message.answer(text, reply_markup=kb)
         return
 
-    text = "🚨 <b>Лог ошибок</b>\n\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"📊 Всего ошибок: {total}\n"
-    text += f"🆕 Новых: {new}\n"
-    text += f"📅 За последние 24ч: {last24}\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━\n\n"
-
+    text = f"🚨 <b>Лог ошибок</b>\n\n📊 Всего: {total}\n🆕 Новых: {new}\n📅 За 24ч: {last24}\n\n"
     cur = await conn.execute("SELECT error_type, details, timestamp FROM error_logs ORDER BY id DESC LIMIT 5")
     rows = await cur.fetchall()
     for (etype, details, ts) in rows:
-        text += f"⚠️ <b>{_esc(etype)}</b> — {_esc(str(ts)[:16])}\n"
-        text += f"<i>{_esc(details)[:300]}</i>\n\n"
+        text += f"⚠️ <b>{_esc(etype)}</b> — {_esc(str(ts)[:16])}\n<i>{_esc(details)[:300]}</i>\n\n"
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📋 Скопировать логи", callback_data="errors_copy")],
-        [InlineKeyboardButton(text="📤 Скачать файл", callback_data="errors_download")],
         [InlineKeyboardButton(text="🗑 Очистить лог", callback_data="errors_clear")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
     ])
-    await message.answer(text, reply_markup=kb)
-
-
-@dp.callback_query(F.data == "errors_copy")
-async def errors_copy(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    conn = await get_db()
-    cur = await conn.execute("SELECT error_type, details, timestamp FROM error_logs ORDER BY id DESC LIMIT 20")
-    rows = await cur.fetchall()
-    logs = f"🚨 ЛОГ ОШИБОК — {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-    logs += "━━━━━━━━━━━━━━━━━━━━━\n"
-    logs += f"Всего: {len(rows)}\n\n"
-    for i, (etype, details, ts) in enumerate(rows, 1):
-        logs += f"[{i}] ⚠️ {etype} — {str(ts)[:16]}\n"
-        logs += f"{details[:500]}\n\n"
-    logs += "━━━━━━━━━━━━━━━━━━━━━"
-
-    safe = html.escape(logs)
-    if len(safe) > 3500:
-        safe = safe[:3500] + "\n... (обрезано)"
-
-    await callback.message.answer(
-        f"📋 <b>Логи для копирования</b>\n\nНажмите на текст ниже — он скопируется.\n\n<code>{safe}</code>"
-    )
-
-
-@dp.callback_query(F.data == "errors_download")
-async def errors_download(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    conn = await get_db()
-    cur = await conn.execute("SELECT error_type, details, timestamp FROM error_logs ORDER BY id DESC LIMIT 100")
-    rows = await cur.fetchall()
-    if not rows:
-        await callback.message.answer("Нет ошибок.")
-        return
-
-    filename = f"error_logs_{datetime.now().strftime('%Y-%m-%d_%H-%M')}.txt"
-    content = "🚨 ЛОГ ОШИБОК\n"
-    content += f"Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-    content += f"Всего: {len(rows)}\n\n"
-    for i, (etype, details, ts) in enumerate(rows, 1):
-        content += "━━━━━━━━━━━━━━━━━━━━━\n"
-        content += f"[{i}] {etype}\n"
-        content += f"Время: {ts}\n"
-        content += f"Детали: {details}\n\n"
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(content)
-
-    try:
-        await callback.message.answer_document(
-            FSInputFile(filename),
-            caption=f"📤 Файл с логами ошибок ({len(rows)} записей)"
-        )
-    except:
-        pass
-
-    try:
-        Path(filename).unlink()
-    except:
-        pass
+    await callback.message.answer(text, reply_markup=kb)
 
 
 @dp.callback_query(F.data == "errors_clear")
 async def errors_clear(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     await conn.execute("DELETE FROM error_logs")
     await conn.commit()
@@ -3597,8 +3343,7 @@ async def errors_clear(callback: CallbackQuery):
 @dp.callback_query(F.data == "admin_broadcast")
 async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     await state.set_state(BroadcastState.waiting_for_message)
     lang = await get_user_lang(callback.from_user.id)
     await callback.message.answer("📢 Введите текст для рассылки:", reply_markup=get_cancel_kb(lang))
@@ -3606,8 +3351,7 @@ async def admin_broadcast(callback: CallbackQuery, state: FSMContext):
 
 @dp.message(BroadcastState.waiting_for_message)
 async def do_broadcast(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
+    if not await is_admin(message.from_user.id): return
     conn = await get_db()
     cur = await conn.execute("SELECT user_id FROM users")
     users = [row[0] async for row in cur]
@@ -3617,66 +3361,53 @@ async def do_broadcast(message: Message, state: FSMContext):
             await bot.send_message(uid, message.text)
             success += 1
             await asyncio.sleep(0.05)
-        except:
-            pass
+        except: pass
     await state.clear()
     await message.answer(f"✅ Рассылка завершена: {success}/{len(users)}")
-    await log_action(message.from_user.id, message.from_user.username or "", "broadcast", f"sent={success}/{len(users)}")
 
 
 @dp.callback_query(F.data == "admin_add_admin")
 async def add_admin_start(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     await state.set_state(AddAdminState.waiting_for_id)
-    lang = await get_user_lang(callback.from_user.id)
-    await callback.message.answer("Введите Telegram ID нового администратора:", reply_markup=get_cancel_kb(lang))
+    await callback.message.answer("Введите Telegram ID нового администратора:", reply_markup=get_cancel_kb("ru"))
 
 
 @dp.message(AddAdminState.waiting_for_id)
 async def add_admin_finish(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
+    if not await is_admin(message.from_user.id): return
     try:
         new_id = int(message.text.strip())
         await add_admin(new_id)
         await message.answer(f"✅ Администратор {new_id} добавлен.")
-        await log_action(message.from_user.id, message.from_user.username or "", "add_admin", f"id={new_id}")
-    except:
-        await message.answer("❌ Введите корректный числовой ID.")
+    except: await message.answer("❌ Введите корректный числовой ID.")
     await state.clear()
 
 
 @dp.callback_query(F.data == "admin_remove_admin")
 async def remove_admin_start(callback: CallbackQuery, state: FSMContext):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     await state.set_state(RemoveAdminState.waiting_for_id)
-    lang = await get_user_lang(callback.from_user.id)
-    await callback.message.answer("Введите Telegram ID для удаления:", reply_markup=get_cancel_kb(lang))
+    await callback.message.answer("Введите Telegram ID для удаления:", reply_markup=get_cancel_kb("ru"))
 
 
 @dp.message(RemoveAdminState.waiting_for_id)
 async def remove_admin_finish(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
+    if not await is_admin(message.from_user.id): return
     try:
         rem_id = int(message.text.strip())
         await remove_admin(rem_id)
         await message.answer(f"✅ Администратор {rem_id} удалён.")
-        await log_action(message.from_user.id, message.from_user.username or "", "remove_admin", f"id={rem_id}")
-    except:
-        await message.answer("❌ Введите корректный числовой ID.")
+    except: await message.answer("❌ Введите корректный числовой ID.")
     await state.clear()
 
 
 @dp.callback_query(F.data == "admin_list_admins")
 async def list_admins(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     conn = await get_db()
     cur = await conn.execute("SELECT user_id FROM admins")
     ids = [str(row[0]) async for row in cur]
@@ -3686,549 +3417,15 @@ async def list_admins(callback: CallbackQuery):
 @dp.callback_query(F.data == "admin_backup")
 async def admin_backup(callback: CallbackQuery):
     await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
+    if not await is_admin(callback.from_user.id): return
     try:
-        await create_and_send_backup(callback.from_user.id)
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        filename = f"sales_backup_{date_str}.db"
+        shutil.copy(DB_PATH, filename)
+        await bot.send_document(callback.from_user.id, FSInputFile(filename), caption="💾 Бэкап БД")
+        Path(filename).unlink()
     except Exception as e:
         await callback.message.answer("❌ Ошибка создания бэкапа.")
-        logger.error(f"Backup error: {e}")
-
-
-async def create_and_send_backup(admin_id: int):
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    filename = f"sales_backup_{date_str}.db"
-    shutil.copy(DB_PATH, filename)
-
-    conn = await get_db()
-    cur = await conn.execute("SELECT COUNT(*) FROM users")
-    users_count = (await cur.fetchone())[0]
-    cur = await conn.execute("SELECT COUNT(*) FROM sales")
-    deals_count = (await cur.fetchone())[0]
-    cur = await conn.execute("SELECT COUNT(*) FROM donations")
-    donations_count = (await cur.fetchone())[0]
-
-    size_kb = Path(filename).stat().st_size / 1024
-
-    caption = "💾 <b>Бэкап БД</b>\n\n"
-    caption += f"📅 Дата: {date_str}\n"
-    caption += f"📁 Файл: {filename}\n"
-    caption += f"📊 Размер: {size_kb:.1f} КБ\n\n"
-    caption += f"📈 <b>Содержимое:</b>\n"
-    caption += f"• Пользователей: {users_count}\n"
-    caption += f"• Сделок: {deals_count}\n"
-    caption += f"• Донатов: {donations_count}\n"
-
-    try:
-        await bot.send_document(admin_id, FSInputFile(filename), caption=caption)
-    except:
-        pass
-
-    try:
-        Path(filename).unlink()
-    except:
-        pass
-
-
-# ============================================================
-# АДМИН-ПАНЕЛЬ ГИФОК
-# ============================================================
-
-@dp.callback_query(F.data == "admin_gif_panel")
-async def admin_gif_panel(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    await show_gif_panel(callback.message)
-
-
-async def show_gif_panel(message: Message):
-    counts = await gif_db.gif_count_by_status()
-    pending = counts.get("pending", 0)
-    ready = counts.get("ready", 0)
-    error = counts.get("error", 0)
-
-    text = (
-        f"🎬 <b>Генерация гиф</b>\n\n"
-        f"📊 Статус кэша:\n"
-        f"• ⏳ В процессе: <b>{pending}</b>\n"
-        f"• ✅ Готово: <b>{ready}</b>\n"
-        f"• ❌ Ошибок: <b>{error}</b>\n\n"
-        f"Выбери действие:"
-    )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Сгенерировать гифку", callback_data="gif_add_start")],
-        [InlineKeyboardButton(text="📋 Готовые гифки", callback_data="gif_list_ready")],
-        [InlineKeyboardButton(text="⏳ В процессе", callback_data="gif_list_pending")],
-        [InlineKeyboardButton(text="❌ Ошибки", callback_data="gif_list_error")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")],
-    ])
-    await message.answer(text, reply_markup=kb)
-
-
-@dp.callback_query(F.data == "gif_add_start")
-async def gif_add_start(callback: CallbackQuery, state: FSMContext):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    await state.set_state(AdminGifAdd.waiting_for_link)
-    lang = await get_user_lang(callback.from_user.id)
-    await callback.message.answer(
-        "🔗 <b>Введи ссылку на NFT</b>\n\n"
-        "Пример: <code>https://t.me/nft/DurovsCap-4074</code>\n\n"
-        "Бот скачает Lottie (или статичную картинку), отрендерит MP4 и запишет в кэш.\n"
-        "Это займёт 30–120 секунд.",
-        reply_markup=get_cancel_kb(lang)
-    )
-
-
-@dp.message(AdminGifAdd.waiting_for_link)
-async def gif_add_process(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
-    lang = await get_user_lang(message.from_user.id)
-
-    link = message.text.strip()
-    slug_full, slug_short, number = _extract_slug_from_link(link)
-    if not slug_full or number is None:
-        await message.answer(
-            "❌ Неверная ссылка. Пример: <code>https://t.me/nft/DurovsCap-4074</code>",
-            reply_markup=get_cancel_kb(lang)
-        )
-        return
-
-    await state.clear()
-
-    existing = await gif_db.gif_get(slug_full)
-    if existing and existing.get("status") == "ready":
-        await message.answer(
-            f"✅ Гифка <code>{slug_full}</code> уже в кэше.\n\n"
-            f"file_id: <code>{existing['mpeg4_file_id'][:40]}...</code>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👁 Открыть карточку", callback_data=f"gif_view_{slug_full}")],
-                [InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"gif_regen_{slug_full}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")],
-            ])
-        )
-        return
-
-    status_msg = await message.answer(f"⏳ Рендерю <code>{slug_full}</code>... Это может занять до 2 минут.")
-
-    nft_data = await parse_nft_link(link) or {"gift_name": slug_short}
-
-    try:
-        await gif_db.gif_set_pending(
-            slug_full, link,
-            nft_data.get("gift_name") or slug_short,
-            message.from_user.id,
-            params_json=json.dumps(gif_renderer.DEFAULT_PARAMS)
-        )
-
-        mp4_path, work_dir = await gif_renderer.render_to_tempfile(slug_full)
-        msg = await bot.send_animation(
-            chat_id=ADMIN_IDS[0],
-            animation=FSInputFile(str(mp4_path), filename=f"{slug_full}.mp4"),
-            caption=f"🎬 {nft_data.get('gift_name', slug_short)}",
-            request_timeout=300
-        )
-
-        file_id = None
-        if msg.animation:
-            file_id = msg.animation.file_id
-        elif msg.document:
-            file_id = msg.document.file_id
-
-        try:
-            await bot.delete_message(chat_id=ADMIN_IDS[0], message_id=msg.message_id)
-        except:
-            pass
-
-        if not file_id:
-            raise RuntimeError("Telegram не вернул file_id")
-
-        caption = _build_gif_caption(nft_data)
-        await gif_db.gif_set_ready(slug_full, file_id, nft_data, caption,
-                                    params_json=json.dumps(gif_renderer.DEFAULT_PARAMS))
-
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except:
-            pass
-
-        await status_msg.edit_text(
-            f"✅ <b>Готово!</b>\n\n"
-            f"<code>{slug_full}</code>\n"
-            f"file_id: <code>{file_id[:40]}...</code>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👁 Открыть карточку", callback_data=f"gif_view_{slug_full}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")],
-            ])
-        )
-    except Exception as e:
-        err_str = str(e)
-        if "404" in err_str or "Lottie" in err_str:
-            logger.warning(f"[admin gif] {slug_full}: Lottie/картинка недоступны")
-        else:
-            logger.exception(f"[admin gif] {slug_full}: {e}")
-        await gif_db.gif_set_error(slug_full, err_str[:1000])
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except:
-            pass
-        await status_msg.edit_text(
-            f"❌ <b>Ошибка рендера</b>\n\n<code>{html.escape(err_str[:300])}</code>\n\n"
-            f"<i>В инлайне эта сделка покажется текстовой карточкой с премиум-эмодзи.</i>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔄 Попробовать снова", callback_data=f"gif_regen_{slug_full}")],
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")],
-            ])
-        )
-
-
-@dp.callback_query(F.data.in_(["gif_list_ready", "gif_list_pending", "gif_list_error"]))
-async def gif_list_handler(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-
-    status = callback.data.replace("gif_list_", "")
-    rows = await gif_db.gif_list(status=status, limit=20)
-
-    if not rows:
-        await callback.message.answer(
-            f"📭 Список <b>{status}</b> пуст.",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")]
-            ])
-        )
-        return
-
-    text = f"📋 <b>{status.upper()}</b> ({len(rows)}):\n\n"
-    kb_rows = []
-    for r in rows:
-        name = r.get("gift_name") or r["slug"]
-        snippet = r.get("error", "")[:60] if r.get("error") else ""
-        text += f"• <code>{r['slug']}</code> — {html.escape(name)}\n"
-        if snippet:
-            text += f"  <i>{html.escape(snippet)}</i>\n"
-        kb_rows.append([
-            InlineKeyboardButton(text=f"👁 {r['slug'][:20]}", callback_data=f"gif_view_{r['slug']}")
-        ])
-
-    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")])
-    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
-
-
-@dp.callback_query(F.data.startswith("gif_view_"))
-async def gif_view(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-
-    slug = callback.data.replace("gif_view_", "")
-    row = await gif_db.gif_get(slug)
-    if not row:
-        await callback.message.answer("❌ Гифка не найдена.")
-        return
-
-    text = (
-        f"🎬 <b>{html.escape(row.get('gift_name') or slug)}</b>\n"
-        f"<code>{slug}</code>\n\n"
-        f"📊 Статус: <b>{row.get('status')}</b>\n"
-    )
-    if row.get("mpeg4_file_id"):
-        text += f"🆔 <code>{row['mpeg4_file_id'][:50]}...</code>\n"
-    if row.get("error"):
-        text += f"❌ Ошибка: <code>{html.escape(row['error'][:200])}</code>\n"
-    if row.get("model"):
-        text += f"🎨 Модель: {html.escape(row['model'])} {row.get('model_rarity') or ''}\n"
-    if row.get("backdrop"):
-        text += f"⚫ Фон: {html.escape(row['backdrop'])} {row.get('backdrop_rarity') or ''}\n"
-    if row.get("symbol"):
-        text += f"🌸 Узор: {html.escape(row['symbol'])} {row.get('symbol_rarity') or ''}\n"
-
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✏️ Редактировать метаданные", callback_data=f"gif_edit_meta_{slug}")],
-        [InlineKeyboardButton(text="⚙️ Параметры рендера", callback_data=f"gif_edit_params_{slug}")],
-        [InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"gif_regen_{slug}")],
-        [InlineKeyboardButton(text="🗑 Удалить из кэша", callback_data=f"gif_delete_{slug}")],
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_gif_panel")],
-    ])
-    await callback.message.answer(text, reply_markup=kb)
-
-    if row.get("mpeg4_file_id") and row.get("status") == "ready":
-        try:
-            await bot.send_animation(
-                chat_id=callback.from_user.id,
-                animation=row["mpeg4_file_id"],
-                caption=row.get("caption") or f"🎬 {row.get('gift_name') or slug}",
-                parse_mode="HTML"
-            )
-        except:
-            pass
-
-
-META_FIELDS = {
-    "gift_name": "Название (gift_name)",
-    "model": "Модель",
-    "backdrop": "Фон",
-    "symbol": "Узор",
-    "model_rarity": "Редкость модели",
-    "backdrop_rarity": "Редкость фона",
-    "symbol_rarity": "Редкость узора",
-    "caption": "Подпись под гифкой (HTML)",
-}
-
-
-@dp.callback_query(F.data.startswith("gif_edit_meta_"))
-async def gif_edit_meta(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    slug = callback.data.replace("gif_edit_meta_", "")
-    kb_rows = []
-    for field, label in META_FIELDS.items():
-        kb_rows.append([InlineKeyboardButton(text=label, callback_data=f"gif_edit_field_{slug}_{field}")])
-    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"gif_view_{slug}")])
-    await callback.message.answer(
-        f"✏️ <b>Что редактируем?</b> <code>{slug}</code>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
-    )
-
-
-@dp.callback_query(F.data.startswith("gif_edit_field_"))
-async def gif_edit_field(callback: CallbackQuery, state: FSMContext):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    parts = callback.data.replace("gif_edit_field_", "").rsplit("_", 1)
-    slug, field = parts[0], parts[1]
-
-    await state.set_state(AdminGifEditMeta.waiting_for_value)
-    await state.update_data(edit_slug=slug, edit_field=field)
-
-    current = await gif_db.gif_get(slug)
-    cur_val = (current or {}).get(field, "")
-    label = META_FIELDS.get(field, field)
-
-    await callback.message.answer(
-        f"✏️ <b>{label}</b>\n\n"
-        f"Текущее значение: <code>{html.escape(str(cur_val))}</code>\n\n"
-        f"Введи новое значение:",
-        reply_markup=get_cancel_kb(await get_user_lang(callback.from_user.id))
-    )
-
-
-@dp.message(AdminGifEditMeta.waiting_for_value)
-async def gif_edit_value(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    slug = data.get("edit_slug")
-    field = data.get("edit_field")
-    value = message.text.strip()
-    if not slug or not field:
-        await state.clear()
-        return
-
-    await gif_db.gif_update_meta(slug, {field: value})
-    await state.clear()
-    await message.answer(
-        f"✅ <code>{slug}</code> → <b>{field}</b> = <code>{html.escape(value)}</code>",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="👁 Открыть карточку", callback_data=f"gif_view_{slug}")],
-            [InlineKeyboardButton(text="⬅️ В админ-панель гиф", callback_data="admin_gif_panel")],
-        ])
-    )
-
-
-PARAM_FIELDS = {
-    "card_w": "Ширина (px)",
-    "card_h": "Высота (px)",
-    "fps": "FPS",
-    "frame_skip": "FRAME_SKIP",
-    "crf": "CRF (качество)",
-    "preset": "Preset (x264)",
-}
-
-
-@dp.callback_query(F.data.startswith("gif_edit_params_"))
-async def gif_edit_params(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    slug = callback.data.replace("gif_edit_params_", "")
-    row = await gif_db.gif_get(slug)
-    params = gif_renderer.DEFAULT_PARAMS
-    if row and row.get("params_json"):
-        try:
-            params = {**gif_renderer.DEFAULT_PARAMS, **json.loads(row["params_json"])}
-        except:
-            pass
-
-    text = f"⚙️ <b>Параметры рендера</b> <code>{slug}</code>\n\n"
-    for k, v in params.items():
-        text += f"• <b>{k}</b>: <code>{v}</code>\n"
-    text += "\nЧто меняем?"
-
-    kb_rows = []
-    for field, label in PARAM_FIELDS.items():
-        kb_rows.append([InlineKeyboardButton(text=label, callback_data=f"gif_param_field_{slug}_{field}")])
-    kb_rows.append([InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"gif_regen_{slug}")])
-    kb_rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"gif_view_{slug}")])
-    await callback.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
-
-
-@dp.callback_query(F.data.startswith("gif_param_field_"))
-async def gif_param_field(callback: CallbackQuery, state: FSMContext):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    parts = callback.data.replace("gif_param_field_", "").rsplit("_", 1)
-    slug, field = parts[0], parts[1]
-
-    await state.set_state(AdminGifEditParams.waiting_for_value)
-    await state.update_data(edit_slug=slug, edit_field=field)
-
-    label = PARAM_FIELDS.get(field, field)
-    await callback.message.answer(
-        f"⚙️ <b>{label}</b>\n\n"
-        f"Введи новое значение (число или строка):",
-        reply_markup=get_cancel_kb(await get_user_lang(callback.from_user.id))
-    )
-
-
-@dp.message(AdminGifEditParams.waiting_for_value)
-async def gif_param_value(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    slug = data.get("edit_slug")
-    field = data.get("edit_field")
-    raw = message.text.strip()
-    if not slug or not field:
-        await state.clear()
-        return
-
-    new_val = raw
-    if field in ("card_w", "card_h", "fps", "frame_skip", "crf"):
-        try:
-            new_val = int(raw)
-        except:
-            await message.answer("❌ Нужно целое число.", reply_markup=get_cancel_kb(await get_user_lang(message.from_user.id)))
-            return
-
-    row = await gif_db.gif_get(slug)
-    params = gif_renderer.DEFAULT_PARAMS
-    if row and row.get("params_json"):
-        try:
-            params = {**gif_renderer.DEFAULT_PARAMS, **json.loads(row["params_json"])}
-        except:
-            pass
-    params[field] = new_val
-
-    conn = await get_db()
-    await conn.execute(
-        "UPDATE gif_cache SET params_json=?, updated_at=CURRENT_TIMESTAMP WHERE slug=?",
-        (json.dumps(params), slug)
-    )
-    await conn.commit()
-
-    await state.clear()
-    await message.answer(
-        f"✅ <code>{slug}</code> → <b>{field}</b> = <code>{new_val}</code>\n\n"
-        f"Не забудь перегенерировать.",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Перегенерировать", callback_data=f"gif_regen_{slug}")],
-            [InlineKeyboardButton(text="👁 Карточка", callback_data=f"gif_view_{slug}")],
-        ])
-    )
-
-
-@dp.callback_query(F.data.startswith("gif_regen_"))
-async def gif_regen(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    slug_full = callback.data.replace("gif_regen_", "")
-    row = await gif_db.gif_get(slug_full)
-    if not row:
-        await callback.message.answer("❌ Не найдено.")
-        return
-
-    params = gif_renderer.DEFAULT_PARAMS
-    if row.get("params_json"):
-        try:
-            params = {**gif_renderer.DEFAULT_PARAMS, **json.loads(row["params_json"])}
-        except:
-            pass
-
-    status_msg = await callback.message.answer(f"⏳ Перегенерирую <code>{slug_full}</code> с параметрами:\n<code>{json.dumps(params)}</code>")
-
-    try:
-        await gif_db.gif_set_pending(
-            slug_full, row.get("nft_link") or "",
-            row.get("gift_name") or slug_full,
-            callback.from_user.id,
-            params_json=json.dumps(params)
-        )
-
-        mp4_path, work_dir = await gif_renderer.render_to_tempfile(slug_full, params=params)
-        msg = await bot.send_animation(
-            chat_id=ADMIN_IDS[0],
-            animation=FSInputFile(str(mp4_path), filename=f"{slug_full}.mp4"),
-            caption=f"🎬 {row.get('gift_name', slug_full)}",
-            request_timeout=300
-        )
-
-        file_id = None
-        if msg.animation:
-            file_id = msg.animation.file_id
-        elif msg.document:
-            file_id = msg.document.file_id
-
-        try:
-            await bot.delete_message(chat_id=ADMIN_IDS[0], message_id=msg.message_id)
-        except:
-            pass
-
-        if not file_id:
-            raise RuntimeError("Telegram не вернул file_id")
-
-        await gif_db.gif_set_ready(slug_full, file_id, row, row.get("caption") or "", json.dumps(params))
-        try:
-            shutil.rmtree(work_dir, ignore_errors=True)
-        except:
-            pass
-
-        await status_msg.edit_text(
-            f"✅ <b>Перегенерировано!</b>\n\n<code>{slug_full}</code>",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="👁 Карточка", callback_data=f"gif_view_{slug_full}")],
-                [InlineKeyboardButton(text="⬅️ В админ-панель гиф", callback_data="admin_gif_panel")],
-            ])
-        )
-    except Exception as e:
-        logger.exception(f"[regen] {slug_full}: {e}")
-        await gif_db.gif_set_error(slug_full, str(e)[:1000])
-        await status_msg.edit_text(f"❌ Ошибка: <code>{html.escape(str(e)[:300])}</code>")
-
-
-@dp.callback_query(F.data.startswith("gif_delete_"))
-async def gif_delete(callback: CallbackQuery):
-    await safe_answer(callback)
-    if not await is_admin(callback.from_user.id):
-        return
-    slug = callback.data.replace("gif_delete_", "")
-    await gif_db.gif_delete(slug)
-    await callback.message.answer(
-        f"🗑 <code>{slug}</code> удалён из кэша.\n\n"
-        f"⚠️ В чатах, куда уже отправлена гифка, она останется (Telegram её хранит).",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ В админ-панель гиф", callback_data="admin_gif_panel")],
-        ])
-    )
 
 
 # ============================================================
@@ -4245,53 +3442,11 @@ async def check_alerts():
                 if price >= row[1]:
                     try:
                         lang = await get_user_lang(row[0])
-                        await bot.send_message(
-                            row[0],
-                            MESSAGES[lang]["alert_triggered"].format(
-                                price=f"{price:.4f}", target=f"{row[1]:.2f}"
-                            )
-                        )
+                        await bot.send_message(row[0], MESSAGES[lang]["alert_triggered"].format(price=f"{price:.4f}", target=f"{row[1]:.2f}"))
                         await conn.execute("UPDATE gram_alerts SET notified=1 WHERE user_id=?", (row[0],))
                         await conn.commit()
-                    except:
-                        pass
-        except Exception as e:
-            logger.error(f"Alert check error: {e}")
-        await asyncio.sleep(300)
-
-
-async def check_price_changes():
-    while True:
-        try:
-            price = await get_gram_price()
-            now = time.time()
-            conn = await get_db()
-            await conn.execute("INSERT OR REPLACE INTO gram_price_log (timestamp, price) VALUES (?,?)", (now, price))
-            await conn.commit()
-            day_ago = now - 86400
-            cur = await conn.execute("SELECT price FROM gram_price_log WHERE timestamp <= ? ORDER BY timestamp DESC LIMIT 1", (day_ago,))
-            old_row = await cur.fetchone()
-            if old_row:
-                old_price = old_row[0]
-                change_pct = abs(price - old_price) / old_price * 100
-                cur2 = await conn.execute("SELECT user_id, percent, disabled_until FROM user_change_alerts WHERE enabled=1")
-                rows = await cur2.fetchall()
-                for row in rows:
-                    uid, percent, disabled_until = row
-                    if disabled_until and disabled_until > now:
-                        continue
-                    if change_pct >= percent:
-                        try:
-                            lang = await get_user_lang(uid)
-                            direction = "вырос" if price > old_price else "упал"
-                            await bot.send_message(uid, MESSAGES[lang]["price_change"].format(
-                                direction=direction, pct=f"{change_pct:.1f}",
-                                price=f"{price:.4f}", old_price=f"{old_price:.4f}"
-                            ))
-                        except:
-                            pass
-        except Exception as e:
-            logger.error(f"Price change check error: {e}")
+                    except: pass
+        except Exception as e: logger.error(f"Alert check error: {e}")
         await asyncio.sleep(300)
 
 
@@ -4305,107 +3460,15 @@ async def check_timers():
             for row in rows:
                 try:
                     lang = await get_user_lang(row['user_id'])
-                    if row['event_type'] == 'mint':
-                        text = MESSAGES[lang]["timer_mint_notify"].format(link=row['nft_link'] or "—")
-                    elif row['event_type'] == 'relist':
-                        text = MESSAGES[lang]["timer_relist_notify"].format(link=row['nft_link'] or "—")
-                    else:
-                        text = MESSAGES[lang]["timer_unlock_notify"]
+                    if row['event_type'] == 'mint': text = MESSAGES[lang]["timer_mint_notify"].format(link=row['nft_link'] or "—")
+                    elif row['event_type'] == 'relist': text = MESSAGES[lang]["timer_relist_notify"].format(link=row['nft_link'] or "—")
+                    else: text = MESSAGES[lang]["timer_unlock_notify"]
                     await bot.send_message(row['user_id'], text)
                     await conn.execute("UPDATE timers SET notified=1 WHERE id=?", (row['id'],))
                     await conn.commit()
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"Timer check error: {e}")
+                except: pass
+        except Exception as e: logger.error(f"Timer check error: {e}")
         await asyncio.sleep(300)
-
-
-async def send_earnings_reports():
-    while True:
-        try:
-            now = datetime.now()
-            if now.hour == 12:
-                conn = await get_db()
-                if now.weekday() == 0:
-                    await send_report(conn, "weekly", 7, "неделю")
-                if now.day == 1:
-                    await send_report(conn, "monthly", 30, "месяц")
-                if now.day == 1 and now.month == 1:
-                    await send_report(conn, "yearly", 365, "год")
-        except Exception as e:
-            logger.error(f"Earnings report error: {e}")
-        await asyncio.sleep(3600)
-
-
-async def send_report(conn, report_type, days, period_name):
-    cur = await conn.execute(f"SELECT user_id FROM user_earnings_reports WHERE {report_type}=1")
-    users = await cur.fetchall()
-    since = time.time() - days * 86400
-    for (user_id,) in users:
-        try:
-            cur2 = await conn.execute(
-                "SELECT SUM(profit_gram), SUM(profit_usd) FROM sales WHERE user_id=? AND created_at >= datetime(?, 'unixepoch')",
-                (user_id, since)
-            )
-            total_g, total_u = await cur2.fetchone()
-            total_g = total_g or 0
-            total_u = total_u or 0
-            if total_g != 0 or total_u != 0:
-                lang = await get_user_lang(user_id)
-                await bot.send_message(
-                    user_id,
-                    f"📊 <b>Отчёт о заработке</b>\n\n"
-                    f"За период ({period_name}) вы заработали:\n"
-                    f"💰 <b>{total_g:.4f} GRAM</b>\n"
-                    f"{EMOJI_DOLLAR} <b>{total_u:+.2f}$</b>\n\n"
-                    f"Продолжайте в том же духе!"
-                )
-        except:
-            pass
-
-
-async def daily_backup_task():
-    last_backup_date = None
-    while True:
-        try:
-            now = datetime.utcnow()
-            current_date = now.strftime("%Y-%m-%d")
-            if now.hour == 3 and last_backup_date != current_date:
-                main_admin = ADMIN_IDS[0]
-                try:
-                    await create_and_send_backup(main_admin)
-                    last_backup_date = current_date
-                    logger.info(f"Daily backup sent to {main_admin}")
-                except Exception as e:
-                    logger.error(f"Daily backup error: {e}")
-        except Exception as e:
-            logger.error(f"Backup task error: {e}")
-        await asyncio.sleep(300)
-
-
-async def send_startup_errors():
-    try:
-        conn = await get_db()
-        day_ago = time.time() - 86400
-        cur = await conn.execute(
-            "SELECT COUNT(*) FROM error_logs WHERE timestamp >= datetime(?, 'unixepoch')",
-            (day_ago,)
-        )
-        count = (await cur.fetchone())[0]
-        if count > 0:
-            main_admin = ADMIN_IDS[0]
-            text = (
-                f"🚨 <b>Ошибки при прошлом запуске</b>\n\n"
-                f"Найдено: {count} ошибок за последние 24 часа.\n\n"
-                f"Откройте админ-панель → «🚨 Проверить ошибки» для подробностей."
-            )
-            try:
-                await bot.send_message(main_admin, text)
-            except:
-                pass
-    except Exception as e:
-        logger.error(f"Startup errors send error: {e}")
 
 
 # ============================================================
@@ -4414,19 +3477,15 @@ async def send_startup_errors():
 async def main():
     logger.info(f"🚀 Бот запускается... {VERSION}")
     await init_db()
+    await load_global_settings()
 
     try:
         await gif_renderer.init_browser()
     except Exception as e:
         logger.error(f"⚠️ Не удалось запустить Chromium: {e}")
-        logger.error("Гифки не будут рендериться. Проверь установку chromium.")
 
     asyncio.create_task(check_alerts())
-    asyncio.create_task(check_price_changes())
     asyncio.create_task(check_timers())
-    asyncio.create_task(send_earnings_reports())
-    asyncio.create_task(daily_backup_task())
-    await send_startup_errors()
 
     logger.info("🤖 Бот запущен!")
     try:
