@@ -1,63 +1,29 @@
-# ============================================================
-# Dockerfile для Bothost (гифки в инлайне)
-# python:3.11-slim + chromium + ffmpeg + шрифты
-# ============================================================
 FROM python:3.11-slim
 
-# --- Системные зависимости ---
-# chromium          — headless-браузер для pyppeteer (рендер Lottie)
-# ffmpeg            — склейка PNG-кадров в MP4
-# fonts-liberation  — шрифты для корректного рендера текста
-# libnss3, libnspr4, libatk..., libxtst6, libxss1, libx11-xcb1,
-# libxcursor1, libxi6, libglib2.0-0 — библиотеки, без которых
-# chromium не стартует в headless-режиме (ошибка
-# "Browser closed unexpectedly").
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Системные зависимости
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    libssl-dev \
     ffmpeg \
     chromium \
-    chromium-driver \
-    fonts-liberation \
-    libnss3 \
-    libnspr4 \
+    libgbm1 \
+    libasound2 \
     libatk-bridge2.0-0 \
     libatk1.0-0 \
-    libcups2 \
-    libdrm2 \
-    libgbm1 \
     libgtk-3-0 \
-    libasound2 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxrandr2 \
-    libxkbcommon0 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libxtst6 \
-    libxss1 \
-    libx11-xcb1 \
-    libxcursor1 \
-    libxi6 \
-    libglib2.0-0 \
+    libnspr4 \
+    libnss3 \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
+# Указываем pyppeteer использовать системный Chromium
+ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-# --- Python-зависимости ---
-ENV PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10
+WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# --- Код ---
 COPY . .
-
-# --- Папка для временных файлов рендера ---
-RUN mkdir -p /app/data /app/temp && chmod 777 /app/data /app/temp
-
-# --- Переменные окружения для pyppeteer ---
-# PYPPETEER_HOME — куда pyppeteer скачает свой Chromium (если не найдёт системный)
-# CHROME_BIN    — путь к системному chromium
-ENV PYPPETEER_HOME=/app/.pyppeteer
-ENV CHROME_BIN=/usr/bin/chromium
-
-# --- Запуск ---
 CMD ["python", "bot.py"]
