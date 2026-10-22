@@ -9,8 +9,3 @@ beautifulsoup4>=4.12.0
 # ===== РЕНДЕР ГИФОК =====
 pyppeteer>=1.0.2
 Pillow>=10.0.0
-
-# ===== СИСТЕМНОЕ (ставится отдельно, не через pip) =====
-# chromium  — headless-браузер для pyppeteer
-# ffmpeg    — склейка PNG-кадров в MP4
-# fonts-liberation — шрифты для корректного рендера текста
