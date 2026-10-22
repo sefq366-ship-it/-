@@ -1,10 +1,5 @@
 # ============================================================
 # gif_renderer.py — рендер Lottie / static → MP4 для Telegram
-# v1.2.7 (без изменений от v1.2.6):
-#   - Lottie 404 → fallback на статичную картинку Fragment (.webp)
-#   - статичная картинка → MP4 (3 сек, зацикливание)
-#   - работает для новых коллекций (Lucky Locket, Astral Shard и т.д.)
-#   - если и картинка 404 — RuntimeError, в инлайне текстовая карточка
 # ============================================================
 import asyncio
 import json
@@ -38,44 +33,15 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 
 _browser = None
 
-
 async def init_browser():
     global _browser
     if _browser is not None:
         return _browser
 
-    logger.info("=" * 60)
-    logger.info("🔍 ДИАГНОСТИКА CHROMIUM")
-    logger.info(f"CHROME_BIN = {os.environ.get('CHROME_BIN')}")
-    logger.info(f"/usr/bin/chromium exists = {os.path.exists('/usr/bin/chromium')}")
-
-    try:
-        ver = subprocess.run(
-            ['/usr/bin/chromium', '--version'],
-            capture_output=True, text=True, timeout=10
-        )
-        logger.info(f"chromium --version: {ver.stdout.strip() or ver.stderr.strip()} (rc={ver.returncode})")
-    except Exception as e:
-        logger.error(f"chromium --version failed: {e}")
-
-    try:
-        ldd = subprocess.run(
-            ['ldd', '/usr/bin/chromium'],
-            capture_output=True, text=True, timeout=10
-        )
-        missing = [l.strip() for l in ldd.stdout.split('\n') if 'not found' in l]
-        if missing:
-            logger.error(f"❌ MISSING LIBS: {missing}")
-        else:
-            logger.info("✅ Все библиотеки на месте")
-    except Exception as e:
-        logger.error(f"ldd failed: {e}")
-    logger.info("=" * 60)
-
     logger.info("🎬 Запускаю Chromium для рендера гифок...")
     _browser = await pyppeteer.launch(
         headless=True,
-        executablePath='/usr/bin/chromium',
+        executablePath='/usr/bin/chromium', # Если на винде, укажи путь к chrome.exe
         args=[
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -104,7 +70,6 @@ def check_ffmpeg():
 
 
 async def download_lottie(slug_full: str, dest: Path):
-    """Lottie есть только у старых коллекций. При 404 — возвращает 0."""
     url = LOTTIE_URL.format(slug=slug_full)
     logger.info(f"[lottie] → {url}")
     timeout = aiohttp.ClientTimeout(total=30)
@@ -121,7 +86,6 @@ async def download_lottie(slug_full: str, dest: Path):
 
 
 async def download_fragment_image(slug_full: str, dest: Path):
-    """Статичное превью NFT с Fragment (.webp). Работает для всех."""
     url = IMAGE_URL.format(slug=slug_full)
     logger.info(f"[image] → {url}")
     timeout = aiohttp.ClientTimeout(total=30)
@@ -177,37 +141,24 @@ def _build_html(bg_data: dict, anim_data: dict, params: dict) -> str:
 
 
 async def render_static_mp4(webp_path: Path, out_mp4: Path, params: dict):
-    """Статичная картинка → MP4 (3 сек, зацикливание)."""
     ff = check_ffmpeg()
     duration = int(params.get("static_duration", 3))
     cw = params["card_w"]
     ch = params["card_h"]
 
     cmd = [
-        ff, "-y",
-        "-loop", "1",
-        "-i", str(webp_path),
-        "-t", str(duration),
+        ff, "-y", "-loop", "1", "-i", str(webp_path), "-t", str(duration),
         "-vf", f"scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=#1a1a1a,format=yuv420p",
-        "-r", str(params["fps"]),
-        "-c:v", "libx264",
-        "-profile:v", "main",
-        "-level", "4.0",
-        "-preset", params["preset"],
-        "-crf", str(params["crf"]),
-        "-pix_fmt", params["pix_fmt"],
-        "-threads", "0",
-        "-movflags", "+faststart",
+        "-r", str(params["fps"]), "-c:v", "libx264", "-profile:v", "main",
+        "-level", "4.0", "-preset", params["preset"], "-crf", str(params["crf"]),
+        "-pix_fmt", params["pix_fmt"], "-threads", "0", "-movflags", "+faststart",
         str(out_mp4),
     ]
     logger.info(f"[static-render] ffmpeg → {out_mp4.name}")
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if res.returncode != 0:
         raise RuntimeError(f"ffmpeg static error: {res.stderr[-500:]}")
-
-    size_mp4 = out_mp4.stat().st_size
-    logger.info(f"[static-render] MP4 {size_mp4} байт")
-    return size_mp4
+    return out_mp4.stat().st_size
 
 
 async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path):
@@ -218,7 +169,6 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
     size = await download_lottie(slug_full, lottie_path)
     if size == 0:
         raise RuntimeError(f"Lottie 404 для {slug_full}")
-    logger.info(f"[render] {slug_full}: Lottie {size} байт")
 
     data = json.loads(lottie_path.read_text(encoding="utf-8"))
 
@@ -260,42 +210,23 @@ async def render_mp4(slug_full: str, out_mp4: Path, params: dict, work_dir: Path
             await page.evaluate(f"setFrame({fnum})")
             fp = frames_dir / f"f_{idx:06d}.png"
             await page.screenshot({"path": str(fp), "omitBackground": True})
-
-        logger.info(f"[render] {slug_full}: {len(frame_numbers)} кадров, fps={final_fps}")
     finally:
         await page.close()
 
     cmd = [
-        ff, "-y",
-        "-framerate", str(final_fps),
-        "-i", str(work_dir / "frames" / "f_%06d.png"),
-        "-an",
-        "-c:v", "libx264",
-        "-profile:v", "main",
-        "-level", "4.0",
-        "-preset", params["preset"],
-        "-crf", str(params["crf"]),
-        "-pix_fmt", params["pix_fmt"],
-        "-threads", "0",
-        "-movflags", "+faststart",
+        ff, "-y", "-framerate", str(final_fps), "-i", str(work_dir / "frames" / "f_%06d.png"),
+        "-an", "-c:v", "libx264", "-profile:v", "main", "-level", "4.0",
+        "-preset", params["preset"], "-crf", str(params["crf"]),
+        "-pix_fmt", params["pix_fmt"], "-threads", "0", "-movflags", "+faststart",
         str(out_mp4),
     ]
     res = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if res.returncode != 0:
         raise RuntimeError(f"ffmpeg error: {res.stderr[-500:]}")
-
-    size_mp4 = out_mp4.stat().st_size
-    logger.info(f"[render] {slug_full}: MP4 {size_mp4} байт")
-    return size_mp4
+    return out_mp4.stat().st_size
 
 
 async def render_to_tempfile(slug_full: str, params: dict = None):
-    """
-    v1.2.7: 
-      1. Lottie → анимированная гифка
-      2. .webp с Fragment → статичная MP4 (3 сек)
-      3. Если .webp 404 → RuntimeError → в инлайне текстовая карточка
-    """
     params = {**DEFAULT_PARAMS, **(params or {})}
     work_dir = Path(tempfile.mkdtemp(prefix=f"gif_{slug_full}_"))
     out_mp4 = work_dir / f"{slug_full}.mp4"
@@ -312,3 +243,26 @@ async def render_to_tempfile(slug_full: str, params: dict = None):
     await download_fragment_image(slug_full, webp_path)
     await render_static_mp4(webp_path, out_mp4, params)
     return out_mp4, work_dir
+
+# ===== НОВОЕ: Генерация заглушки =====
+async def generate_placeholder(logo_path: str, out_mp4: Path, params: dict):
+    """Создает короткое видео из логотипа для заглушки"""
+    ff = check_ffmpeg()
+    cw = params.get("card_w", 800)
+    ch = params.get("card_h", 450)
+    
+    # Плавный зум логотипа на темном фоне
+    cmd = [
+        ff, "-y", "-loop", "1", "-i", logo_path,
+        "-t", "2",
+        "-vf", f"scale={cw}:{ch}:force_original_aspect_ratio=decrease,pad={cw}:{ch}:(ow-iw)/2:(oh-ih)/2:color=#111111,zoompan=z='min(zoom+0.0015,1.2)':d=48:s={cw}x{ch}:fps=24",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "28",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        str(out_mp4)
+    ]
+    
+    logger.info("[placeholder] Генерирую заглушку...")
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if res.returncode != 0:
+        raise RuntimeError(f"ffmpeg placeholder error: {res.stderr[-500:]}")
+    return out_mp4
