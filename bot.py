@@ -9,6 +9,7 @@ REQUIRED_LIBS = {
     "aiohttp": "aiohttp",
     "pyppeteer": "pyppeteer",
     "bs4": "beautifulsoup4",
+    "PIL": "pillow",
 }
 
 for module_name, pip_name in REQUIRED_LIBS.items():
@@ -62,9 +63,9 @@ from aiogram.types import (
 import pyppeteer
 
 from messages import MESSAGES
-from gift_sat import init_gift_sat, stars_to_ton
 
-BOT_TOKEN = "8544228"
+# ---------- КОНФИГ ----------
+BOT_TOKEN = "09787"
 ADMIN_IDS = [1012040843]
 DB_PATH = "sales.db"
 BOT_URL = "https://t.me/Stars2ProfitBot"
@@ -79,8 +80,8 @@ dp = Dispatcher(storage=storage)
 db = None
 browser_instance = None
 gif_render_lock = asyncio.Lock()
-gift_sat_module = None
 
+# ---------- ЭМОДЗИ ----------
 EMOJI_COLLECTION_FALLBACK = "🎁"
 EMOJI_DIAMOND  = '<tg-emoji emoji-id="5296742257146241213">💎</tg-emoji>'
 EMOJI_MONEY    = '<tg-emoji emoji-id="5902206159095339799">🤑</tg-emoji>'
@@ -91,7 +92,7 @@ EMOJI_MODEL_FALLBACK    = "🎨"
 EMOJI_BACKDROP_FALLBACK = "⚫"
 EMOJI_SYMBOL_FALLBACK   = "🌸"
 
-
+# ---------- ТРОТТЛИНГ ----------
 class ThrottlingMiddleware(BaseMiddleware):
     def __init__(self, rate_limit=0.3):
         self.rate_limit = rate_limit
@@ -119,11 +120,10 @@ class ThrottlingMiddleware(BaseMiddleware):
                     pass
             return
 
-
 dp.message.middleware(ThrottlingMiddleware(0.5))
 dp.callback_query.middleware(ThrottlingMiddleware(0.3))
 
-
+# ---------- FSM ----------
 class AddProfit(StatesGroup):
     waiting_for_nft_link = State()
     waiting_for_buy_amount = State()
@@ -193,7 +193,7 @@ class TimerAdd(StatesGroup):
 class GifSettingsStates(StatesGroup):
     waiting_for_value = State()
 
-
+# ---------- ЯЗЫК ----------
 async def get_user_lang(user_id):
     conn = await get_db()
     cur = await conn.execute("SELECT lang FROM user_settings WHERE user_id=?", (user_id,))
@@ -205,6 +205,7 @@ async def set_user_lang(user_id, lang):
     await conn.execute("INSERT OR REPLACE INTO user_settings (user_id, lang) VALUES (?,?)", (user_id, lang))
     await conn.commit()
 
+# ---------- БАЗА ДАННЫХ ----------
 async def get_db():
     global db
     if db is None:
@@ -279,26 +280,128 @@ async def init_db():
             collection_emoji_id TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
-        CREATE TABLE IF NOT EXISTS user_royalty (user_id INTEGER PRIMARY KEY, royalty_gram REAL DEFAULT 0.3, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, username TEXT, first_name TEXT, last_name TEXT, joined_date TIMESTAMP, last_activity TIMESTAMP, referred_by INTEGER);
-        CREATE TABLE IF NOT EXISTS profit_goals (user_id INTEGER PRIMARY KEY, goal_gram REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, notified INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS gram_alerts (user_id INTEGER PRIMARY KEY, target_price REAL, enabled INTEGER DEFAULT 1, notified INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS user_star_rates (user_id INTEGER PRIMARY KEY, star_rate REAL DEFAULT 0.013, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS user_change_alerts (user_id INTEGER PRIMARY KEY, enabled INTEGER DEFAULT 0, percent REAL DEFAULT 5.0, disabled_until REAL DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS gram_price_log (timestamp REAL PRIMARY KEY, price REAL);
-        CREATE TABLE IF NOT EXISTS admins (user_id INTEGER PRIMARY KEY);
-        CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER PRIMARY KEY, lang TEXT DEFAULT 'ru');
-        CREATE TABLE IF NOT EXISTS donations (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, amount INTEGER NOT NULL, date TEXT, telegram_payment_charge_id TEXT);
-        CREATE TABLE IF NOT EXISTS timers (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, event_type TEXT, nft_link TEXT, stars_amount INTEGER, event_time REAL, description TEXT, notified INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS user_earnings_reports (user_id INTEGER PRIMARY KEY, weekly INTEGER DEFAULT 1, monthly INTEGER DEFAULT 1, yearly INTEGER DEFAULT 1);
-        CREATE TABLE IF NOT EXISTS user_collections (user_id INTEGER, collection_name TEXT, last_used TIMESTAMP, use_count INTEGER DEFAULT 1, PRIMARY KEY (user_id, collection_name));
-        CREATE TABLE IF NOT EXISTS referrals (user_id INTEGER PRIMARY KEY, referrer_id INTEGER, date_joined TIMESTAMP DEFAULT CURRENT_TIMESTAMP, is_active INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS action_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, username TEXT, action TEXT, details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS inline_stats (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, username TEXT, first_name TEXT, deal_id INTEGER, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-        CREATE TABLE IF NOT EXISTS error_logs (id INTEGER PRIMARY KEY AUTOINCREMENT, error_type TEXT, details TEXT, timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, reported INTEGER DEFAULT 0);
-        CREATE TABLE IF NOT EXISTS gif_settings (id INTEGER PRIMARY KEY CHECK (id = 1), width INTEGER DEFAULT 1024, height INTEGER DEFAULT 576, fps INTEGER DEFAULT 30, frame_skip INTEGER DEFAULT 3, crf INTEGER DEFAULT 23, preset TEXT DEFAULT 'veryfast');
+        CREATE TABLE IF NOT EXISTS user_royalty (
+            user_id INTEGER PRIMARY KEY,
+            royalty_gram REAL DEFAULT 0.3,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT,
+            first_name TEXT,
+            last_name TEXT,
+            joined_date TIMESTAMP,
+            last_activity TIMESTAMP,
+            referred_by INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS profit_goals (
+            user_id INTEGER PRIMARY KEY,
+            goal_gram REAL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notified INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS gram_alerts (
+            user_id INTEGER PRIMARY KEY,
+            target_price REAL,
+            enabled INTEGER DEFAULT 1,
+            notified INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS user_star_rates (
+            user_id INTEGER PRIMARY KEY,
+            star_rate REAL DEFAULT 0.013,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS user_change_alerts (
+            user_id INTEGER PRIMARY KEY,
+            enabled INTEGER DEFAULT 0,
+            percent REAL DEFAULT 5.0,
+            disabled_until REAL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS gram_price_log (
+            timestamp REAL PRIMARY KEY,
+            price REAL
+        );
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            lang TEXT DEFAULT 'ru'
+        );
+        CREATE TABLE IF NOT EXISTS donations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            date TEXT,
+            telegram_payment_charge_id TEXT
+        );
+        CREATE TABLE IF NOT EXISTS timers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            event_type TEXT,
+            nft_link TEXT,
+            stars_amount INTEGER,
+            event_time REAL,
+            description TEXT,
+            notified INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS user_earnings_reports (
+            user_id INTEGER PRIMARY KEY,
+            weekly INTEGER DEFAULT 1,
+            monthly INTEGER DEFAULT 1,
+            yearly INTEGER DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS user_collections (
+            user_id INTEGER,
+            collection_name TEXT,
+            last_used TIMESTAMP,
+            use_count INTEGER DEFAULT 1,
+            PRIMARY KEY (user_id, collection_name)
+        );
+        CREATE TABLE IF NOT EXISTS referrals (
+            user_id INTEGER PRIMARY KEY,
+            referrer_id INTEGER,
+            date_joined TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS action_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT,
+            details TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS inline_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT,
+            deal_id INTEGER,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS error_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            error_type TEXT,
+            details TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            reported INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS gif_settings (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            width INTEGER DEFAULT 1024,
+            height INTEGER DEFAULT 576,
+            fps INTEGER DEFAULT 30,
+            frame_skip INTEGER DEFAULT 3,
+            crf INTEGER DEFAULT 23,
+            preset TEXT DEFAULT 'veryfast'
+        );
         INSERT OR IGNORE INTO gif_settings (id) VALUES (1);
-        CREATE TABLE IF NOT EXISTS gif_cache (slug TEXT PRIMARY KEY, file_id TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+        CREATE TABLE IF NOT EXISTS gif_cache (
+            slug TEXT PRIMARY KEY,
+            file_id TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         CREATE TABLE IF NOT EXISTS tracking (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
@@ -309,6 +412,7 @@ async def init_db():
         );
     ''')
 
+    # Миграции для старых БД
     for col, typ in [('nft_link', 'TEXT'), ('gram_price', 'REAL DEFAULT 0'), ('gram_price_buy', 'REAL DEFAULT 0'), ('royalty_gram', 'REAL DEFAULT 0'), ('thumb_file_id', 'TEXT')]:
         try: await conn.execute(f"ALTER TABLE pending_sales ADD COLUMN {col} {typ}")
         except: pass
@@ -338,7 +442,7 @@ async def init_db():
         except: pass
     await conn.commit()
 
-
+# ---------- ЛОГИРОВАНИЕ ----------
 async def log_action(user_id: int, username: str, action: str, details: str = ""):
     try:
         conn = await get_db()
@@ -357,7 +461,7 @@ async def log_error(error_type: str, details: str):
     except Exception as e:
         logger.error(f"Log error failure: {e}")
 
-
+# ---------- КУРС ----------
 gram_cache = {"price": 0.0, "timestamp": 0}
 
 async def get_gram_price():
@@ -380,7 +484,6 @@ async def get_gram_price():
         await log_error("coingecko", str(e)[:500])
     return gram_cache["price"] or 2.5
 
-
 def compute_profit_usd(buy_amount, sell_amount, royalty, gram_price_buy, gram_price_sell, fallback_gram_price=0.0):
     try:
         gp_buy  = float(gram_price_buy or 0)
@@ -397,7 +500,7 @@ def compute_profit_usd(buy_amount, sell_amount, royalty, gram_price_buy, gram_pr
         logger.warning(f"[compute_profit_usd] {e}")
         return 0.0
 
-
+# ---------- УТИЛИТЫ ----------
 def get_profit_emoji(p):
     if p > 1: return "🚀"
     elif p > 0.5: return "💎"
@@ -647,8 +750,10 @@ async def parse_nft_link(nft_link: str):
         if catalog and catalog.get("collection_emoji_id"): result["collection_emoji_id"] = catalog["collection_emoji_id"]
         return result
     if source_data.get("gift_name"): result["gift_name"] = source_data["gift_name"]
+
     if source_data.get("image"):
         result["nft_image"] = source_data["image"]
+
     for name_key, section, out_prefix in (("model_name", "models", "model"), ("backdrop_name", "backdrops", "backdrop"), ("symbol_name", "symbols", "symbol")):
         real_name = source_data.get(name_key)
         if not real_name: continue
@@ -714,40 +819,52 @@ async def download_file(url, path):
             d = await r.read()
     path.write_bytes(d)
 
+# ---------- ЗАГРУЗКА ПРЕВЬЮ В TELEGRAM (ИСПРАВЛЕНО) ----------
 async def upload_thumb_to_telegram(image_url):
     if not image_url:
+        logger.info("[THUMB] nft_image=None")
         return None
+    logger.info(f"[THUMB] nft_image={image_url}")
     try:
         async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0"}) as s:
             async with s.get(image_url) as r:
                 if r.status != 200:
+                    logger.warning(f"[THUMB] HTTP {r.status} for {image_url}")
                     return None
                 data = await r.read()
-        
-        img = Image.open(io.BytesIO(data)).convert("RGB")
-        img.thumbnail((320, 320), Image.Resampling.LANCZOS)
-        
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=85)
-        buf.seek(0)
-        
+        logger.info(f"[THUMB] downloaded {len(data)} bytes")
+        try:
+            img = Image.open(io.BytesIO(data)).convert("RGB")
+            img.thumbnail((320, 320), Image.Resampling.LANCZOS)
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            payload = buf.getvalue()
+            fname = "thumb.jpg"
+            logger.info("[THUMB] PIL convert OK (jpg)")
+        except Exception as e:
+            logger.warning(f"[THUMB] PIL failed: {e}, sending raw bytes")
+            payload = data
+            fname = "thumb.webp"
+
         msg = await bot.send_photo(
             chat_id=ADMIN_IDS[0],
-            photo=BufferedInputFile(buf.getvalue(), filename="thumb.jpg"),
+            photo=BufferedInputFile(payload, filename=fname),
             disable_notification=True
         )
         file_id = msg.photo[-1].file_id
-        
+        logger.info(f"[THUMB] thumb_id={file_id}")
+
         try:
             await bot.delete_message(chat_id=ADMIN_IDS[0], message_id=msg.message_id)
         except:
             pass
-        
+
         return file_id
     except Exception as e:
-        logger.warning(f"upload_thumb error: {e}")
+        logger.warning(f"[THUMB] upload error: {e}")
         return None
 
+# ---------- РЕНДЕР ГИФОК ----------
 async def render_gif_for_nft(slug, work_dir):
     s = await get_gif_settings()
     R_W = s["width"]
@@ -960,7 +1077,7 @@ async def switch_language(message: Message, state: FSMContext):
     await message.answer(msgs["lang_changed"], reply_markup=get_main_kb(new_lang))
 
 
-# ---------- ДОБАВЛЕНИЕ СДЕЛКИ (ссылка первая + автоподсказка цены) ----------
+# ---------- ДОБАВЛЕНИЕ СДЕЛКИ (ссылка первая) ----------
 @dp.message(F.text.in_(["📊 Добавить сделку", "📊 Add Deal"]))
 async def add_deal_start(message: Message, state: FSMContext):
     await state.clear()
@@ -997,18 +1114,6 @@ async def process_nft_link(message: Message, state: FSMContext):
             await message.answer(f"{collection_emoji} <b>{gift_name}</b>\n<i>Характеристики не найдены</i>", reply_markup=get_cancel_kb(lang))
 
         asyncio.create_task(background_gif_render(link))
-
-        # Автоподсказка цены покупки через GiftSat
-        slug_for_price = nft_data.get("slug") or link.split("/nft/")[1].split("/")[0].split("?")[0]
-        try:
-            auto_price = await gift_sat_module.get_last_purchase_price(slug_for_price)
-        except Exception:
-            auto_price = None
-
-        if auto_price:
-            await state.set_state(AddProfit.waiting_for_buy_amount)
-            await gift_sat_module.ask_buy_price(message.chat.id, slug_for_price, auto_price)
-            return
 
     await state.set_state(AddProfit.waiting_for_buy_amount)
     await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
@@ -1124,19 +1229,6 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
          data.get("symbol"), data.get("symbol_rarity"), data.get("symbol_emoji_id"),
          data.get("collection_emoji_id"))
     )
-
-    # Добавляем в tracking для отслеживания продажи
-    slug = None
-    if data.get("nft_link") and "/nft/" in data["nft_link"]:
-        slug = data["nft_link"].split("/nft/")[1].split("/")[0].split("?")[0]
-    if slug:
-        cur2 = await conn.execute("SELECT last_insert_rowid() AS id")
-        sale_id = (await cur2.fetchone())["id"]
-        await conn.execute(
-            "INSERT INTO tracking (user_id, slug, sale_id, state) VALUES (?,?,?,?)",
-            (user_id, slug, sale_id, "bought")
-        )
-
     await conn.commit()
     await add_user_collection(user_id, data["category"])
     await state.clear()
@@ -1183,7 +1275,9 @@ async def process_pending_nft_link(message: Message, state: FSMContext):
     if nft_data:
         await state.update_data(**nft_data)
 
+        logger.info(f"[THUMB] pending nft_image={nft_data.get('nft_image')}")
         thumb_id = await upload_thumb_to_telegram(nft_data.get("nft_image"))
+        logger.info(f"[THUMB] pending thumb_id={thumb_id}")
         if thumb_id:
             await state.update_data(thumb_file_id=thumb_id)
 
@@ -1442,6 +1536,13 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
         if fresh:
             nft_data = fresh
 
+    # Пытаемся достать thumb_file_id из pending или дозаполнить
+    thumb_id = row.get("thumb_file_id") if "thumb_file_id" in row.keys() else None
+    if not thumb_id:
+        nft_img = nft_data.get("nft_image")
+        if nft_img:
+            thumb_id = await upload_thumb_to_telegram(nft_img)
+
     await conn.execute(
         """INSERT INTO sales (user_id, category, nft_link, nft_image, thumb_file_id, date, buy_amount, sell_amount, gram_price,
            gram_price_buy, gram_price_sell, profit_gram, profit_usd, royalty_gram,
@@ -1449,7 +1550,7 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
            backdrop, backdrop_rarity, backdrop_emoji_id,
            symbol, symbol_rarity, symbol_emoji_id, collection_emoji_id)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (user_id, row["category"], row["nft_link"], row.get("nft_image") if "nft_image" in row.keys() else None, row.get("thumb_file_id") if "thumb_file_id" in row.keys() else None, row["date"], buy_amt, sell_amount, gram_price_sell,
+        (user_id, row["category"], row["nft_link"], nft_data.get("nft_image") if "nft_image" in nft_data else None, thumb_id, row["date"], buy_amt, sell_amount, gram_price_sell,
          gram_price_buy, gram_price_sell, round(profit_gram, 4), profit_usd, royalty,
          nft_data.get("gift_name"), nft_data.get("model"), nft_data.get("model_rarity"), nft_data.get("model_emoji_id"),
          nft_data.get("backdrop"), nft_data.get("backdrop_rarity"), nft_data.get("backdrop_emoji_id"),
@@ -1459,19 +1560,6 @@ async def finalize_pending(message: Message, state: FSMContext, royalty: float, 
     await conn.execute("DELETE FROM pending_sales WHERE id=?", (pending_id,))
     if row["nft_link"]:
         await conn.execute("DELETE FROM timers WHERE user_id=? AND nft_link=? AND notified=0", (user_id, row["nft_link"]))
-
-    # tracking
-    slug = None
-    if row["nft_link"] and "/nft/" in row["nft_link"]:
-        slug = row["nft_link"].split("/nft/")[1].split("/")[0].split("?")[0]
-    if slug:
-        cur2 = await conn.execute("SELECT last_insert_rowid() AS id")
-        sale_id = (await cur2.fetchone())["id"]
-        await conn.execute(
-            "INSERT INTO tracking (user_id, slug, sale_id, state) VALUES (?,?,?,?)",
-            (user_id, slug, sale_id, "bought")
-        )
-
     await conn.commit()
     await add_user_collection(user_id, row["category"])
     await state.clear()
@@ -1534,7 +1622,6 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
         await callback.message.edit_text(MESSAGES[lang]["deleted"])
     except:
         await callback.message.answer(MESSAGES[lang]["deleted"])
-
 
 # ---------- РЕДАКТИРОВАНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
@@ -1823,6 +1910,7 @@ async def history_pagination(callback: CallbackQuery):
     current_page = int(parts[2])
     new_page = current_page - 1 if direction == "prev" else current_page + 1
     await show_history_page(callback.message, callback.from_user.id, new_page)
+
 
 # ---------- СТАТИСТИКА ----------
 def quickchart_url(config):
@@ -2579,6 +2667,7 @@ async def goal_later(callback: CallbackQuery):
     except:
         pass
 
+
 # ============================================================
 # АДМИН-ПАНЕЛЬ
 # ============================================================
@@ -2620,7 +2709,6 @@ async def show_admin_panel(message: Message):
         [InlineKeyboardButton(text="📋 Логи действий", callback_data="admin_logs")],
         [InlineKeyboardButton(text="🚨 Проверить ошибки", callback_data="admin_errors")],
         [InlineKeyboardButton(text="🎨 Настройки гифки", callback_data="admin_gif_settings")],
-        [InlineKeyboardButton(text="🏦 Комиссии маркетов", callback_data="admin_market_fees")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
         [InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_admin")],
@@ -2782,58 +2870,6 @@ async def gif_set_value(message: Message, state: FSMContext):
         await message.answer("❌ Некорректное значение. Попробуй ещё раз.")
     finally:
         await state.clear()
-
-
-# ---------- КОМИССИИ МАРКЕТОВ ----------
-@dp.callback_query(F.data == "admin_market_fees")
-async def admin_market_fees(callback: CallbackQuery):
-    await callback.answer()
-    if not await is_admin(callback.from_user.id):
-        return
-    conn = await get_db()
-    cur = await conn.execute("SELECT * FROM market_fees ORDER BY market")
-    rows = await cur.fetchall()
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for r in rows:
-        kb.inline_keyboard.append([InlineKeyboardButton(
-            text=f"{r['market']}: {r['fee']*100:.1f}%",
-            callback_data=f"set_fee:{r['market']}"
-        )])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")])
-    await callback.message.edit_text("🏦 <b>Комиссии маркетов</b>\nНажми на маркет, чтобы изменить процент.", reply_markup=kb)
-
-
-class SetMarketFee(StatesGroup):
-    waiting_for_percent = State()
-
-@dp.callback_query(F.data.startswith("set_fee:"))
-async def set_fee_start(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    if not await is_admin(callback.from_user.id):
-        return
-    market = callback.data.split(":")[1]
-    await state.update_data(fee_market=market)
-    await state.set_state(SetMarketFee.waiting_for_percent)
-    await callback.message.answer(f"Введи комиссию для <b>{market}</b> в процентах (например 2.5):")
-    await callback.answer()
-
-
-@dp.message(SetMarketFee.waiting_for_percent)
-async def set_fee_value(message: Message, state: FSMContext):
-    if not await is_admin(message.from_user.id):
-        return
-    data = await state.get_data()
-    market = data.get("fee_market")
-    try:
-        percent = float(message.text.replace(",", "."))
-        fee = percent / 100.0
-        conn = await get_db()
-        await conn.execute("UPDATE market_fees SET fee=? WHERE market=?", (fee, market))
-        await conn.commit()
-        await message.answer(f"✅ Комиссия для {market} = {percent:.2f}%")
-    except:
-        await message.answer("Введи число.")
-    await state.clear()
 
 
 # ---------- РАСШИРЕННАЯ СТАТИСТИКА ----------
@@ -3473,8 +3509,30 @@ async def send_startup_errors():
         logger.error(f"Startup errors send error: {e}")
 
 
+# ---------- ФОНОВАЯ ДОЗАГРУЗКА ПРЕВЬЮ ----------
+async def backfill_thumbs():
+    """Периодически дозаполняет thumb_file_id для старых сделок, где он NULL."""
+    while True:
+        try:
+            conn = await get_db()
+            cur = await conn.execute(
+                "SELECT id, nft_image FROM sales WHERE thumb_file_id IS NULL AND nft_image IS NOT NULL AND nft_image != '' LIMIT 10"
+            )
+            rows = await cur.fetchall()
+            for row in rows:
+                thumb_id = await upload_thumb_to_telegram(row["nft_image"])
+                if thumb_id:
+                    await conn.execute("UPDATE sales SET thumb_file_id=? WHERE id=?", (thumb_id, row["id"]))
+                    await conn.commit()
+                    logger.info(f"[THUMB] backfilled deal #{row['id']} -> {thumb_id}")
+                await asyncio.sleep(1.5)
+        except Exception as e:
+            logger.error(f"backfill_thumbs: {e}")
+        await asyncio.sleep(60)
+
+
 # ============================================================
-# ИНЛАЙН-РЕЖИМ С ПРЕВЬЮ
+# ИНЛАЙН-РЕЖИМ (С ИКОНКАМИ)
 # ============================================================
 def inline_bot_keyboard(user_id: int = None):
     if user_id:
@@ -3557,14 +3615,18 @@ async def inline_query(inline_query):
         thumb_id = deal_dict.get("thumb_file_id")
 
         if thumb_id:
+            # CachedPhoto — превью гарантировано
             results.append(InlineQueryResultCachedPhoto(
                 id=f"sale_{deal_dict['id']}",
                 photo_file_id=thumb_id,
+                title=f"#{deal_dict['id']} {gift_name}",
+                description=f"Куплено: {deal_dict['buy_amount']} → Продано: {deal_dict['sell_amount']} GRAM",
                 caption=build_inline_html(deal_dict),
                 parse_mode="HTML",
                 reply_markup=inline_bot_keyboard(user_id=uid)
             ))
         else:
+            # Fallback — статья с thumbnail_url
             results.append(InlineQueryResultArticle(
                 id=f"sale_{deal_dict['id']}",
                 title=f"#{deal_dict['id']} {gift_name} ({profit:+.4f} GRAM / {profit_usd:+.2f}$)",
@@ -3629,6 +3691,9 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     except Exception as e:
         logger.error(f"inlinestats error: {e}")
 
+    # Пробуем заменить на гифку, если она есть.
+    # Для CachedPhoto результата edit_message_media на анимацию НЕВОЗМОЖЕН —
+    # Telegram бросит ошибку, но мы её просто проигнорируем.
     gif_id = deal_dict.get("gif_file_id")
     nft_link = deal_dict.get("nft_link")
     slug = None
@@ -3656,22 +3721,30 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
             )
             logger.info(f"Гифка для deal #{deal_id} вставлена из кэша")
         except Exception as e:
-            logger.warning(f"Attach gif err: {e}")
+            # Ожидаемо для CachedPhoto — просто debug, не warning
+            logger.debug(f"Attach gif skipped for deal #{deal_id}: {e}")
+
+
+# ============================================================
+# ВНЕДРЕНИЕ GIFT_SAT МОДУЛЯ
+# ============================================================
+def init_gift_sat(dp: Dispatcher, bot, get_db, get_user_lang, ADMIN_IDS, AddProfit=None):
+    """
+    Регистрирует хендлеры gift_sat и возвращает модуль (для запуска poll_sales).
+    """
+    from gift_sat_module import GiftSatModule
+    module = GiftSatModule(bot, get_db, get_user_lang, ADMIN_IDS, AddProfit)
+    module.register(dp)
+    return module
 
 
 # ============================================================
 # ЗАПУСК
 # ============================================================
 async def main():
-    global browser_instance, gift_sat_module
+    global browser_instance
     logger.info("🚀 Бот запускается...")
     await init_db()
-
-    # Сбрасываем вебхук + накопленные апдейты, чтобы не ловить Flood control
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-    except Exception:
-        pass
 
     logger.info("Запускаю Chromium для рендера гифок...")
     try:
@@ -3685,20 +3758,27 @@ async def main():
         logger.error(f"Не удалось запустить Chromium: {e}")
         browser_instance = None
 
-    # GiftSat: polling продаж
+    # Внедрение gift_sat
     try:
-        gift_sat_module = init_gift_sat(dp, bot, get_db, get_user_lang, ADMIN_IDS)
+        gift_sat_module = init_gift_sat(dp, bot, get_db, get_user_lang, ADMIN_IDS, AddProfit)
         asyncio.create_task(gift_sat_module.poll_sales())
-        logger.info("GiftSat: polling продаж запущен")
+        logger.info("✅ GiftSat модуль подключён")
     except Exception as e:
-        logger.error(f"GiftSat init error: {e}")
+        logger.error(f"❌ Ошибка подключения GiftSat: {e}", exc_info=True)
 
     asyncio.create_task(check_alerts())
     asyncio.create_task(check_price_changes())
     asyncio.create_task(check_timers())
     asyncio.create_task(send_earnings_reports())
     asyncio.create_task(daily_backup_task())
+    asyncio.create_task(backfill_thumbs())
     await send_startup_errors()
+
+    # Сброс вебхука, чтобы избежать flood control при старте
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+    except Exception as e:
+        logger.debug(f"delete_webhook skip: {e}")
 
     logger.info("🤖 Бот запущен!")
     try:
