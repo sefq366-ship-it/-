@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import logging
+from datetime import datetime
 from aiogram import Dispatcher, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -23,12 +24,16 @@ class GiftSatStates(StatesGroup):
 
 
 class GiftSatModule:
-    def __init__(self, bot, get_db, get_user_lang, ADMIN_IDS):
+    def __init__(self, bot, get_db, get_user_lang, ADMIN_IDS, AddProfit=None):
         self.bot = bot
         self.get_db = get_db
         self.get_user_lang = get_user_lang
         self.ADMIN_IDS = ADMIN_IDS
+        self.AddProfit = AddProfit
 
+    # =========================================================
+    # API
+    # =========================================================
     async def api_get(self, path, params=None):
         headers = {"Authorization": f"Token {GIFT_SAT_TOKEN}"}
         try:
@@ -55,6 +60,9 @@ class GiftSatModule:
             logger.warning(f"GiftSat {path}: {e}")
             return None
 
+    # =========================================================
+    # Получение цен
+    # =========================================================
     async def get_last_purchase_price(self, slug):
         data = await self.api_get("/user/purchases", {"page": 0})
         if not data:
@@ -68,6 +76,18 @@ class GiftSatModule:
                 return price
         return None
 
+    async def get_last_sale_price(self, slug, collection):
+        data = await self.api_post(f"/history/{collection}", {"page": 0, "pageSize": 20, "sortBy": "date"})
+        if not data:
+            return None
+        for sale in data.get("content", []):
+            if sale.get("slug") == slug:
+                return float(sale.get("normalizedPrice") or 0), sale.get("market", "")
+        return None
+
+    # =========================================================
+    # Уведомления с кнопками
+    # =========================================================
     async def ask_buy_price(self, chat_id, slug, price_ton):
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"✅ Да, {price_ton:.2f} TON", callback_data=f"buy_auto:{price_ton}")],
@@ -100,6 +120,9 @@ class GiftSatModule:
             reply_markup=kb
         )
 
+    # =========================================================
+    # Polling продаж
+    # =========================================================
     async def poll_sales(self):
         while True:
             try:
@@ -135,10 +158,14 @@ class GiftSatModule:
                 logger.error(f"poll_sales: {e}")
             await asyncio.sleep(120)
 
+    # =========================================================
+    # Регистрация хендлеров
+    # =========================================================
     def register(self, dp: Dispatcher):
         bot = self.bot
         get_db = self.get_db
         get_user_lang = self.get_user_lang
+        AddProfit = self.AddProfit
 
         @dp.callback_query(F.data.startswith("buy_auto:"))
         async def buy_auto(callback: CallbackQuery, state: FSMContext):
@@ -148,7 +175,8 @@ class GiftSatModule:
             await callback.answer()
             lang = await get_user_lang(callback.from_user.id)
             from messages import MESSAGES
-            await state.set_state("AddProfit:waiting_for_category")
+            if AddProfit is not None:
+                await state.set_state(AddProfit.waiting_for_category)
             await callback.message.answer(MESSAGES[lang]["enter_collection"])
 
         @dp.callback_query(F.data == "buy_manual")
@@ -202,7 +230,7 @@ class GiftSatModule:
 
             conn = await get_db()
             cur = await conn.execute(
-                "SELECT id, sale_id FROM tracking WHERE user_id=? AND slug=? AND state IN ('bought','awaiting_manual')",
+                "SELECT id, sale_id FROM tracking WHERE user_id=? AND slug=? AND state='bought'",
                 (uid, slug)
             )
             row = await cur.fetchone()
@@ -259,7 +287,10 @@ class GiftSatModule:
             await message.answer(f"✅ Зафиксировано: {price:.2f} TON")
 
 
-def init_gift_sat(dp: Dispatcher, bot, get_db, get_user_lang, ADMIN_IDS):
-    module = GiftSatModule(bot, get_db, get_user_lang, ADMIN_IDS)
+# =========================================================
+# Точка входа модуля
+# =========================================================
+def init_gift_sat(dp: Dispatcher, bot, get_db, get_user_lang, ADMIN_IDS, AddProfit=None):
+    module = GiftSatModule(bot, get_db, get_user_lang, ADMIN_IDS, AddProfit)
     module.register(dp)
     return module
