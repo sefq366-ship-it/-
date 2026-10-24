@@ -40,6 +40,17 @@ class GiftSatModule:
                     return await r.json()
         except: return None
 
+    async def get_last_sale_price(self, slug, collection):
+        body = {"page": 0, "pageSize": 20, "sortBy": "date"}
+        data = await self.api_post(f"/history/{collection}", body)
+        if not data or "content" not in data: return None
+        for sale in data["content"]:
+            if sale.get("slug") == slug:
+                price = float(sale.get("normalizedPrice") or 0)
+                market = sale.get("market", "")
+                return (price, market)
+        return None
+
     async def ask_sell_price(self, chat_id, slug, price_ton, force_manual=False):
         if force_manual:
             await self.bot.send_message(chat_id, f"💰 NFT <code>{slug}</code> продалась на Fragment.\nВведи сумму продажи в TON:")
