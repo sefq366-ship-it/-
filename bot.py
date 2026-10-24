@@ -907,8 +907,10 @@ async def background_gif_render(nft_link):
                 except: pass
                 await conn.execute("INSERT OR REPLACE INTO gif_cache (slug, file_id) VALUES (?, ?)", (slug, file_id))
                 await conn.commit()
+        except Exception as e:
+            logger.warning(f"Фоновая гифка для {slug}: {e}")
 
-        # ---------- /start ----------
+# ---------- /start ----------
 @dp.message(Command("start"))
 async def start_cmd(message: Message, state: FSMContext):
     await state.clear()
@@ -955,7 +957,7 @@ async def switch_language(message: Message, state: FSMContext):
     await set_user_lang(user_id, new_lang)
     await message.answer(MESSAGES[new_lang]["lang_changed"], reply_markup=get_main_kb(new_lang))
 
-# ---------- ДОБАВЛЕНИЕ СДЕЛКИ ----------
+# ---------- ДОБАВЛЕНИЕ СДЕЛКИ (С АВТОЦЕНОЙ) ----------
 @dp.message(F.text.in_(["📊 Добавить сделку", "📊 Add Deal"]))
 async def add_deal_start(message: Message, state: FSMContext):
     await state.clear()
@@ -985,8 +987,56 @@ async def process_nft_link(message: Message, state: FSMContext):
         await message.answer(msg_text, reply_markup=get_cancel_kb(lang))
         asyncio.create_task(background_gif_render(link))
 
-    await state.set_state(AddProfit.waiting_for_buy_amount)
-    await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
+    # Пытаемся автоматически получить цену из GiftSat
+    auto_price = None
+    if "t.me/nft/" in link:
+        try:
+            from gift_sat_module import GiftSatModule
+            gs = GiftSatModule(bot, get_db, get_user_lang, ADMIN_IDS)
+            slug = link.split("/nft/")[1].split("/")[0].split("?")[0]
+            collection = slug.rsplit("-", 1)[0]
+            
+            sale_data = await gs.get_last_sale_price(slug, collection)
+            if sale_data:
+                auto_price = sale_data[0]
+        except Exception as e:
+            logger.warning(f"Auto price fetch error: {e}")
+
+    if auto_price:
+        await state.update_data(buy_amount=auto_price)
+        gram_price_buy = await get_gram_price()
+        await state.update_data(gram_price_buy=gram_price_buy)
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Да, {auto_price:.2f} TON", callback_data="auto_buy_yes")],
+            [InlineKeyboardButton(text="✏️ Введу вручную", callback_data="auto_buy_no")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_deal")]
+        ])
+        await state.set_state(AddProfit.waiting_for_buy_amount)
+        await message.answer(
+            f"📥 Бот нашел последнюю цену продажи для этого NFT:\n"
+            f"💰 <b>{auto_price:.2f} TON</b> ({gram_price_buy * auto_price:.2f}$)\n\n"
+            f"Это цена покупки?", 
+            reply_markup=kb
+        )
+    else:
+        await state.set_state(AddProfit.waiting_for_buy_amount)
+        await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
+
+@dp.callback_query(F.data == "auto_buy_yes")
+async def auto_buy_yes(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    data = await state.get_data()
+    amount = data.get("buy_amount")
+    await state.set_state(AddProfit.waiting_for_category)
+    await callback.message.edit_text(f"✅ Цена покупки зафиксирована: {amount:.2f} TON\n\n{MESSAGES[lang]['enter_collection']}")
+
+@dp.callback_query(F.data == "auto_buy_no")
+async def auto_buy_no(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    lang = await get_user_lang(callback.from_user.id)
+    await callback.message.edit_text(MESSAGES[lang]["enter_buy_amount"])
 
 @dp.message(AddProfit.waiting_for_buy_amount)
 async def process_buy_amount(message: Message, state: FSMContext):
@@ -1078,7 +1128,6 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
     )
     await conn.commit()
     
-    # Авто-добавление в трекер GiftSat
     cur = await conn.execute("SELECT last_insert_rowid()")
     sale_id = (await cur.fetchone())[0]
     if data.get("nft_link") and "t.me/nft/" in data["nft_link"]:
@@ -1377,10 +1426,10 @@ async def confirm_delete_pending(callback: CallbackQuery, state: FSMContext):
         await conn.execute("DELETE FROM pending_sales WHERE id=? AND user_id=?", (pending_id, callback.from_user.id))
         await conn.commit()
     await state.clear()
-    try: await callback.message.edit_text(MESSAGES[lang]["deleted"])
-    except: await callback.message.answer(MESSAGES[lang]["deleted"])
-        except Exception as e:
-            logger.warning(f"Фоновая гифка для {slug}: {e}")
+    try:
+        await callback.message.edit_text(MESSAGES[lang]["deleted"])
+    except:
+        await callback.message.answer(MESSAGES[lang]["deleted"])
 
 # ---------- РЕДАКТИРОВАНИЕ СДЕЛКИ ----------
 @dp.callback_query(F.data.regexp(r"^edit_\d+$"))
@@ -2120,7 +2169,7 @@ async def goal_later(callback: CallbackQuery):
     try: await callback.message.delete()
     except: pass
 
-    # ---------- ИНЛАЙН-РЕЖИМ ----------
+  # ---------- ИНЛАЙН-РЕЖИМ ----------
 def inline_bot_keyboard(user_id: int = None):
     url = f"{BOT_URL}?start=ref_{user_id}" if user_id else BOT_URL
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть бота", url=url)]])
@@ -2145,23 +2194,54 @@ async def inline_query(inline_query):
     uid = inline_query.from_user.id
     query = (inline_query.query or "").strip()
     conn = await get_db()
-    if query.isdigit(): cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=? ORDER BY id DESC", (int(query), uid))
-    else: cur = await conn.execute("SELECT * FROM sales WHERE user_id=? AND (category LIKE ? OR gift_name LIKE ?) ORDER BY id DESC LIMIT 10", (uid, f"%{query}%", f"%{query}%"))
+    if query.isdigit(): 
+        cur = await conn.execute("SELECT * FROM sales WHERE id=? AND user_id=? ORDER BY id DESC", (int(query), uid))
+    else: 
+        cur = await conn.execute("SELECT * FROM sales WHERE user_id=? AND (category LIKE ? OR gift_name LIKE ?) ORDER BY id DESC LIMIT 10", (uid, f"%{query}%", f"%{query}%"))
+    
     deals = [dict(row) for row in await cur.fetchall()]
     results = []
+    
     for d in deals:
         gift_name = d.get('gift_name') or d.get('category') or 'NFT'
         profit, profit_usd = d.get('profit_gram') or 0, d.get('profit_usd') or 0
         desc = f"💎 {d['buy_amount']} → {d['sell_amount']} GRAM | 💰 {profit:+.4f} GRAM ({profit_usd:+.2f}$)"
+        caption_html = build_inline_html(d)
         thumb_id = d.get("thumb_file_id")
+        
         if thumb_id:
-            results.append(InlineQueryResultCachedPhoto(id=f"sale_{d['id']}", photo_file_id=thumb_id, title=f"#{d['id']} {gift_name}", description=desc, caption=build_inline_html(d), parse_mode="HTML", reply_markup=inline_bot_keyboard(user_id=uid)))
+            results.append(InlineQueryResultCachedPhoto(
+                id=f"sale_{d['id']}", 
+                photo_file_id=thumb_id, 
+                title=f"#{d['id']} {gift_name}", 
+                description=desc, 
+                caption=caption_html, 
+                parse_mode="HTML", 
+                reply_markup=inline_bot_keyboard(user_id=uid)
+            ))
         else:
-            results.append(InlineQueryResultArticle(id=f"sale_{d['id']}", title=f"#{d['id']} {gift_name}", description=desc, thumbnail_url=d.get("nft_image"), input_message_content=InputTextMessageContent(message_text=build_inline_plain(d), parse_mode="HTML"), reply_markup=inline_bot_keyboard(user_id=uid)))
+            results.append(InlineQueryResultArticle(
+                id=f"sale_{d['id']}", 
+                title=f"#{d['id']} {gift_name}", 
+                description=desc, 
+                thumbnail_url=d.get("nft_image"), 
+                input_message_content=InputTextMessageContent(message_text=caption_html, parse_mode="HTML"), 
+                reply_markup=inline_bot_keyboard(user_id=uid)
+            ))
+            
     if not results:
-        results.append(InlineQueryResultArticle(id="no_deals", title="Ничего не найдено", description="У вас пока нет сделок", input_message_content=InputTextMessageContent(message_text="🔍 Нет сделок"), reply_markup=inline_bot_keyboard(user_id=uid)))
-    try: await bot.answer_inline_query(inline_query.id, results, cache_time=1, is_personal=True, switch_pm_text="Введи номер сделки (#123) или коллекцию", switch_pm_parameter="inline_help")
-    except: pass
+        results.append(InlineQueryResultArticle(
+            id="no_deals", 
+            title="Ничего не найдено", 
+            description="У вас пока нет сделок", 
+            input_message_content=InputTextMessageContent(message_text="🔍 Нет сделок"), 
+            reply_markup=inline_bot_keyboard(user_id=uid)
+        ))
+        
+    try: 
+        await bot.answer_inline_query(inline_query.id, results, cache_time=1, is_personal=True, switch_pm_text="Введи номер сделки (#123) или коллекцию", switch_pm_parameter="inline_help")
+    except Exception as e: 
+        logger.error(f"Inline error: {e}")
 
 @dp.chosen_inline_result()
 async def chosen_inline_result_handler(chosen: ChosenInlineResult):
@@ -2174,14 +2254,17 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
     row = await cur.fetchone()
     if not row: return
     deal_dict = dict(row)
+    
     try:
         await conn.execute("INSERT INTO inline_stats (user_id, username, first_name, deal_id) VALUES (?,?,?,?)", (uid, chosen.from_user.username or "", chosen.from_user.first_name or "", deal_id))
         await conn.execute("DELETE FROM inline_stats WHERE id NOT IN (SELECT id FROM inline_stats ORDER BY id DESC LIMIT 500)")
         await conn.commit()
     except: pass
+    
     gif_id = deal_dict.get("gif_file_id")
     nft_link = deal_dict.get("nft_link")
     slug = nft_link.split("/nft/")[1].split("/")[0].split("?")[0] if nft_link and "t.me/nft/" in nft_link else None
+    
     if not gif_id and slug:
         cur2 = await conn.execute("SELECT file_id FROM gif_cache WHERE slug=?", (slug,))
         cache_row = await cur2.fetchone()
@@ -2189,12 +2272,14 @@ async def chosen_inline_result_handler(chosen: ChosenInlineResult):
             gif_id = cache_row[0]
             await conn.execute("UPDATE sales SET gif_file_id=? WHERE id=?", (gif_id, deal_id))
             await conn.commit()
+            
     if gif_id:
         try:
             await chosen.bot.edit_message_media(inline_message_id=chosen.inline_message_id, media=InputMediaAnimation(media=gif_id, caption=build_inline_html(deal_dict), parse_mode="HTML"), reply_markup=inline_bot_keyboard(user_id=uid))
-        except: pass
+        except Exception as e: 
+            logger.debug(f"Gif skip: {e}")
 
-# ---------- АДМИН-ПАНЕЛЬ ----------
+# ---------- ПОЛНАЯ АДМИН-ПАНЕЛЬ ----------
 @dp.message(Command("admin"))
 async def admin_cmd(message: Message, state: FSMContext = None):
     if state: await state.clear()
@@ -2202,11 +2287,27 @@ async def admin_cmd(message: Message, state: FSMContext = None):
     conn = await get_db()
     cur = await conn.execute("SELECT COUNT(*) FROM users"); total_users = (await cur.fetchone())[0]
     cur = await conn.execute("SELECT COUNT(*), SUM(profit_gram), SUM(profit_usd) FROM sales"); total_deals, total_g, total_u = await cur.fetchone()
-    text = f"⚙️ <b>Админ-панель</b>\n\n👥 Пользователей: {total_users}\n📊 Всего сделок: {total_deals or 0}\n💰 Прибыль: {total_g or 0:+.4f} GRAM\n"
+    cur = await conn.execute("SELECT COUNT(*) FROM admins"); admin_count = (await cur.fetchone())[0]
+    
+    text = (
+        "⚙️ <b>Админ-панель Gram2Profit</b>\n\n"
+        f"👥 Пользователей: {total_users}\n"
+        f"📊 Всего сделок: {total_deals or 0}\n"
+        f"💰 Общая прибыль: {total_g or 0:+.4f} GRAM (${total_u or 0:+.2f})\n"
+        f"👑 Администраторов: {admin_count}\n"
+    )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="admin_ext_stats"), InlineKeyboardButton(text="📋 Логи", callback_data="admin_logs")],
-        [InlineKeyboardButton(text="🚨 Ошибки", callback_data="admin_errors"), InlineKeyboardButton(text="🎨 Настройки гифки", callback_data="admin_gif_settings")],
+        [InlineKeyboardButton(text="📊 Расширенная статистика", callback_data="admin_ext_stats")],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="admin_users")],
+        [InlineKeyboardButton(text="📈 Инлайн-статистика", callback_data="admin_inline_stats")],
+        [InlineKeyboardButton(text="📋 Логи действий", callback_data="admin_logs")],
+        [InlineKeyboardButton(text="🚨 Проверить ошибки", callback_data="admin_errors")],
+        [InlineKeyboardButton(text="🎨 Настройки гифки", callback_data="admin_gif_settings")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
+        [InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_admin")],
+        [InlineKeyboardButton(text="📋 Список админов", callback_data="admin_list_admins")],
+        [InlineKeyboardButton(text="💾 Бэкап БД", callback_data="admin_backup")],
         [InlineKeyboardButton(text="⬅️ Закрыть", callback_data="close_admin")]
     ])
     await message.answer(text, reply_markup=kb)
@@ -2216,6 +2317,14 @@ async def close_admin(callback: CallbackQuery):
     await callback.answer()
     try: await callback.message.delete()
     except: pass
+
+@dp.callback_query(F.data == "admin_panel")
+async def admin_panel_back(callback: CallbackQuery):
+    await callback.answer()
+    if not await is_admin(callback.from_user.id): return
+    try: await callback.message.delete()
+    except: pass
+    await admin_cmd(callback.message)
 
 @dp.callback_query(F.data == "admin_gif_settings")
 async def admin_gif_settings(callback: CallbackQuery):
@@ -2230,14 +2339,6 @@ async def admin_gif_settings(callback: CallbackQuery):
     ])
     try: await callback.message.edit_text(text, reply_markup=kb)
     except: pass
-
-@dp.callback_query(F.data == "admin_panel")
-async def admin_panel_back(callback: CallbackQuery):
-    await callback.answer()
-    if not await is_admin(callback.from_user.id): return
-    try: await callback.message.delete()
-    except: pass
-    await admin_cmd(callback.message)
 
 @dp.callback_query(F.data.startswith("gif_set_"))
 async def gif_set_start(callback: CallbackQuery, state: FSMContext):
@@ -2285,6 +2386,14 @@ async def admin_ext_stats(callback: CallbackQuery):
     try: await callback.message.edit_text(text, reply_markup=kb)
     except: pass
 
+@dp.callback_query(F.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    await callback.answer()
+    conn = await get_db()
+    cur = await conn.execute("SELECT user_id, username, first_name FROM users ORDER BY joined_date DESC LIMIT 20")
+    text = "👥 <b>Последние пользователи:</b>\n\n" + "\n".join([f"• <code>{r[0]}</code> {r[2] or ''} (@{r[1] or '—'})" for r in await cur.fetchall()])
+    await callback.message.answer(text)
+
 @dp.callback_query(F.data == "admin_logs")
 async def admin_logs(callback: CallbackQuery):
     await callback.answer()
@@ -2323,6 +2432,55 @@ async def do_broadcast(message: Message, state: FSMContext):
         except: pass
     await state.clear()
     await message.answer(f"✅ Рассылка завершена: {success}/{len(users)}")
+
+@dp.callback_query(F.data == "admin_list_admins")
+async def admin_list_admins(callback: CallbackQuery):
+    await callback.answer()
+    conn = await get_db()
+    cur = await conn.execute("SELECT user_id FROM admins")
+    ids = [str(r[0]) async for r in cur]
+    await callback.message.answer("👑 <b>Администраторы:</b>\n" + "\n".join(ids))
+
+@dp.callback_query(F.data == "admin_add_admin")
+async def admin_add_admin(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(AddAdminState.waiting_for_id)
+    await callback.message.answer("Введите Telegram ID нового администратора:", reply_markup=get_cancel_kb(await get_user_lang(callback.from_user.id)))
+
+@dp.message(AddAdminState.waiting_for_id)
+async def process_add_admin(message: Message, state: FSMContext):
+    try:
+        new_id = int(message.text.strip())
+        await add_admin(new_id)
+        await message.answer(f"✅ Администратор {new_id} добавлен.")
+    except: await message.answer("❌ Введите корректный ID.")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_remove_admin")
+async def admin_remove_admin(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(RemoveAdminState.waiting_for_id)
+    await callback.message.answer("Введите Telegram ID для удаления:", reply_markup=get_cancel_kb(await get_user_lang(callback.from_user.id)))
+
+@dp.message(RemoveAdminState.waiting_for_id)
+async def process_remove_admin(message: Message, state: FSMContext):
+    try:
+        rem_id = int(message.text.strip())
+        await remove_admin(rem_id)
+        await message.answer(f"✅ Администратор {rem_id} удалён.")
+    except: await message.answer("❌ Введите корректный ID.")
+    await state.clear()
+
+@dp.callback_query(F.data == "admin_backup")
+async def admin_backup(callback: CallbackQuery):
+    await callback.answer()
+    try:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+        filename = f"sales_backup_{date_str}.db"
+        shutil.copy(DB_PATH, filename)
+        await bot.send_document(callback.from_user.id, FSInputFile(filename), caption=f"💾 Бэкап БД от {date_str}")
+        Path(filename).unlink()
+    except Exception as e: await callback.message.answer(f"❌ Ошибка бэкапа: {e}")
 
 # ---------- ФОНОВЫЕ ЗАДАЧИ ----------
 async def backfill_thumbs():
@@ -2395,4 +2553,4 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())  
