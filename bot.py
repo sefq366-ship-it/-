@@ -987,8 +987,8 @@ async def process_nft_link(message: Message, state: FSMContext):
         await message.answer(msg_text, reply_markup=get_cancel_kb(lang))
         asyncio.create_task(background_gif_render(link))
 
-    # Пытаемся автоматически получить цену из GiftSat
     auto_price = None
+    auto_source = ""
     if "t.me/nft/" in link:
         try:
             from gift_sat_module import GiftSatModule
@@ -996,9 +996,20 @@ async def process_nft_link(message: Message, state: FSMContext):
             slug = link.split("/nft/")[1].split("/")[0].split("?")[0]
             collection = slug.rsplit("-", 1)[0]
             
-            sale_data = await gs.get_last_sale_price(slug, collection)
-            if sale_data:
-                auto_price = sale_data[0]
+            purchase_price = await gs.get_last_purchase_price(slug)
+            if purchase_price:
+                auto_price = purchase_price
+                auto_source = "покупки"
+            else:
+                sale_data = await gs.get_last_sale_price(slug, collection)
+                if sale_data:
+                    auto_price = sale_data[0]
+                    auto_source = f"последней продажи ({sale_data[1]})"
+                else:
+                    listing_data = await gs.get_listing_price(slug, collection)
+                    if listing_data:
+                        auto_price = listing_data[0]
+                        auto_source = f"листинга на {listing_data[1]}"
         except Exception as e:
             logger.warning(f"Auto price fetch error: {e}")
 
@@ -1014,14 +1025,18 @@ async def process_nft_link(message: Message, state: FSMContext):
         ])
         await state.set_state(AddProfit.waiting_for_buy_amount)
         await message.answer(
-            f"📥 Бот нашел последнюю цену продажи для этого NFT:\n"
+            f"📥 Бот нашел цену <b>{auto_source}</b> для этого NFT:\n"
             f"💰 <b>{auto_price:.2f} TON</b> ({gram_price_buy * auto_price:.2f}$)\n\n"
             f"Это цена покупки?", 
             reply_markup=kb
         )
     else:
         await state.set_state(AddProfit.waiting_for_buy_amount)
-        await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
+        await message.answer(
+            f"📥 {MESSAGES[lang]['enter_buy_amount']}\n\n"
+            f"<i>(GiftSat не нашел ни покупок, ни продаж, ни листингов по этой NFT. Возможно, она редкая или не торгуется на Portals/Tonnel/Mrkt.)</i>", 
+            reply_markup=get_cancel_kb(lang)
+        )
 
 @dp.callback_query(F.data == "auto_buy_yes")
 async def auto_buy_yes(callback: CallbackQuery, state: FSMContext):
@@ -1151,7 +1166,7 @@ async def finalize_profit(message: Message, state: FSMContext, royalty: float, u
     if attrs: header = f"{header}\n{attrs}"
     await message.answer(f"{header}\n\n{text}", reply_markup=get_main_kb(lang))
 
-# ---------- ОТЛОЖЕННАЯ ПОКУПКА ----------
+# ---------- ОТЛОЖЕННАЯ ПОКУПКА (С АВТОЦЕНОЙ) ----------
 @dp.message(F.text.in_(["📥 Отложенная покупка", "📥 Pending Buy"]))
 async def pending_start(message: Message, state: FSMContext):
     await state.clear()
@@ -1180,8 +1195,52 @@ async def process_pending_nft_link(message: Message, state: FSMContext):
         await message.answer(msg_text, reply_markup=get_cancel_kb(lang))
         asyncio.create_task(background_gif_render(link))
 
-    await state.set_state(PendingBuy.waiting_for_buy_amount)
-    await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
+    # АВТОПОИСК ЦЕНЫ ДЛЯ ОТЛОЖКИ
+    auto_price = None
+    auto_source = ""
+    if "t.me/nft/" in link:
+        try:
+            from gift_sat_module import GiftSatModule
+            gs = GiftSatModule(bot, get_db, get_user_lang, ADMIN_IDS)
+            slug = link.split("/nft/")[1].split("/")[0].split("?")[0]
+            collection = slug.rsplit("-", 1)[0]
+            
+            purchase_price = await gs.get_last_purchase_price(slug)
+            if purchase_price:
+                auto_price = purchase_price
+                auto_source = "покупки"
+            else:
+                sale_data = await gs.get_last_sale_price(slug, collection)
+                if sale_data:
+                    auto_price = sale_data[0]
+                    auto_source = f"последней продажи ({sale_data[1]})"
+                else:
+                    listing_data = await gs.get_listing_price(slug, collection)
+                    if listing_data:
+                        auto_price = listing_data[0]
+                        auto_source = f"листинга на {listing_data[1]}"
+        except Exception as e:
+            logger.warning(f"Auto price fetch error: {e}")
+
+    if auto_price:
+        await state.update_data(buy_amount=auto_price)
+        gram_price_buy = await get_gram_price()
+        await state.update_data(gram_price_buy=gram_price_buy)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ Да, {auto_price:.2f} TON", callback_data="auto_buy_yes")],
+            [InlineKeyboardButton(text="✏️ Введу вручную", callback_data="auto_buy_no")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_deal")]
+        ])
+        await state.set_state(PendingBuy.waiting_for_buy_amount)
+        await message.answer(
+            f"📥 Бот нашел цену <b>{auto_source}</b> для этого NFT:\n"
+            f"💰 <b>{auto_price:.2f} TON</b> ({gram_price_buy * auto_price:.2f}$)\n\n"
+            f"Это цена покупки?", 
+            reply_markup=kb
+        )
+    else:
+        await state.set_state(PendingBuy.waiting_for_buy_amount)
+        await message.answer(MESSAGES[lang]["enter_buy_amount"], reply_markup=get_cancel_kb(lang))
 
 @dp.message(PendingBuy.waiting_for_buy_amount)
 async def process_pending_buy_amount(message: Message, state: FSMContext):
@@ -1773,7 +1832,7 @@ async def close_stats(callback: CallbackQuery):
     try: await callback.message.delete()
     except: pass
 
-    # ---------- КАЛЬКУЛЯТОР ----------
+# ---------- НАСТРОЙКИ, КАЛЬКУЛЯТОР, ДОНАТЫ, ТАЙМЕРЫ, РЕФЕРАЛЫ ----------
 @dp.message(F.text.in_(["🔄 Калькулятор", "🔄 Calculator"]))
 @dp.message(Command("calc"))
 async def calc_start(message: Message, state: FSMContext):
@@ -1816,7 +1875,6 @@ async def calc_result(message: Message, state: FSMContext):
     except ValueError:
         await message.answer(MESSAGES[lang]["error_positive_number"], reply_markup=get_cancel_kb(lang))
 
-# ---------- НАСТРОЙКИ ----------
 @dp.message(F.text.in_(["⚙️ Настройки", "⚙️ Settings"]))
 async def settings(message: Message):
     lang = await get_user_lang(message.from_user.id)
@@ -1846,11 +1904,6 @@ async def close_settings(callback: CallbackQuery):
     await callback.answer()
     try: await callback.message.delete()
     except: pass
-
-@dp.callback_query(F.data == "open_reports")
-async def open_reports(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await reports_menu(callback.message, state)
 
 @dp.callback_query(F.data == "set_royalty")
 async def set_royalty_cb(callback: CallbackQuery, state: FSMContext):
@@ -1965,7 +2018,6 @@ async def set_alert(message: Message, state: FSMContext):
     except ValueError:
         await message.answer(MESSAGES[lang]["error_positive_number"], reply_markup=get_cancel_kb(lang))
 
-# ---------- ОТЧЁТЫ, ДОНАТЫ, ТАЙМЕРЫ, РЕФЕРАЛЫ ----------
 @dp.message(Command("reports"))
 async def reports_menu(message: Message, state: FSMContext = None):
     if state: await state.clear()
@@ -2155,21 +2207,24 @@ async def referrals_menu(message: Message, state: FSMContext):
     ])
     await message.answer(text, reply_markup=kb)
 
-@dp.callback_query(F.data == "cancel_deal")
-async def cancel_deal(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await state.clear()
-    lang = await get_user_lang(callback.from_user.id)
-    try: await callback.message.edit_text(MESSAGES[lang]["cancelled"])
-    except: await callback.message.answer(MESSAGES[lang]["cancelled"])
-
 @dp.callback_query(F.data == "goal_later")
 async def goal_later(callback: CallbackQuery):
     await callback.answer()
     try: await callback.message.delete()
     except: pass
 
-  # ---------- ИНЛАЙН-РЕЖИМ ----------
+ # ---------- УНИВЕРСАЛЬНАЯ ОТМЕНА ----------
+@dp.callback_query(F.data == "cancel_deal")
+async def cancel_deal_universal(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.clear()
+    lang = await get_user_lang(callback.from_user.id)
+    try:
+        await callback.message.edit_text(MESSAGES[lang]["cancelled"])
+    except:
+        await callback.message.answer(MESSAGES[lang]["cancelled"])
+
+# ---------- ИНЛАЙН-РЕЖИМ ----------
 def inline_bot_keyboard(user_id: int = None):
     url = f"{BOT_URL}?start=ref_{user_id}" if user_id else BOT_URL
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Открыть бота", url=url)]])
@@ -2303,6 +2358,7 @@ async def admin_cmd(message: Message, state: FSMContext = None):
         [InlineKeyboardButton(text="📋 Логи действий", callback_data="admin_logs")],
         [InlineKeyboardButton(text="🚨 Проверить ошибки", callback_data="admin_errors")],
         [InlineKeyboardButton(text="🎨 Настройки гифки", callback_data="admin_gif_settings")],
+        [InlineKeyboardButton(text="🔄 Обновить картинки", callback_data="admin_refresh_thumbs")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_broadcast")],
         [InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add_admin")],
         [InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove_admin")],
@@ -2375,14 +2431,98 @@ async def gif_set_value(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
+@dp.callback_query(F.data == "admin_refresh_thumbs")
+async def admin_refresh_thumbs(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text("⏳ Начинаю обновление картинок для всех сделок. Это может занять время...")
+    
+    conn = await get_db()
+    cur = await conn.execute("SELECT id, nft_image FROM sales WHERE thumb_file_id IS NULL AND nft_image IS NOT NULL AND nft_image != ''")
+    rows = await cur.fetchall()
+    
+    if not rows:
+        await callback.message.edit_text("✅ Все картинки уже загружены!")
+        return
+        
+    updated = 0
+    for row in rows:
+        thumb_id = await upload_thumb_to_telegram(row["nft_image"])
+        if thumb_id:
+            await conn.execute("UPDATE sales SET thumb_file_id=? WHERE id=?", (thumb_id, row["id"]))
+            await conn.commit()
+            updated += 1
+        await asyncio.sleep(0.5)
+        
+    await callback.message.edit_text(f"✅ Обновлено картинок: {updated} из {len(rows)}.\nТеперь инлайн-режим должен показывать превью.")
+
 @dp.callback_query(F.data == "admin_ext_stats")
 async def admin_ext_stats(callback: CallbackQuery):
     await callback.answer()
     conn = await get_db()
+    
     cur = await conn.execute("SELECT COUNT(*) FROM users"); users = (await cur.fetchone())[0]
-    cur = await conn.execute("SELECT COUNT(*), SUM(profit_gram) FROM sales"); deals, total_g = await cur.fetchone()
-    text = f"📊 <b>Расширенная статистика</b>\n\n👥 Пользователи: {users}\n📈 Сделки: {deals or 0}\n💰 Прибыль: {total_g or 0:+.4f} GRAM"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]])
+    cur = await conn.execute("SELECT COUNT(*), SUM(profit_gram), SUM(profit_usd) FROM sales"); deals, total_g, total_u = await cur.fetchone()
+    cur = await conn.execute("SELECT COUNT(*) FROM tracking WHERE state='bought'"); tracking = (await cur.fetchone())[0]
+    
+    cur = await conn.execute("SELECT category, COUNT(*), SUM(profit_gram) FROM sales GROUP BY category ORDER BY SUM(profit_gram) DESC LIMIT 5")
+    top_cols = await cur.fetchall()
+    
+    cur = await conn.execute("SELECT user_id, COUNT(*) FROM sales GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 5")
+    top_users = await cur.fetchall()
+
+    text = "📊 <b>Расширенная статистика</b>\n\n"
+    text += f"👥 Пользователей: {users}\n"
+    text += f"📈 Всего сделок: {deals or 0}\n"
+    text += f"💰 Общая прибыль: {total_g or 0:+.4f} GRAM (${total_u or 0:+.2f})\n"
+    text += f"👀 Отслеживается NFT: {tracking}\n\n"
+    
+    text += "━━━ 📁 ТОП-5 КОЛЛЕКЦИЙ ━━━\n"
+    if top_cols:
+        for i, (cat, cnt, pg) in enumerate(top_cols, 1):
+            text += f"{i}. {cat} — {cnt} шт. ({pg:+.2f} GRAM)\n"
+    else:
+        text += "Пока нет данных.\n"
+        
+    text += "\n━━━ 👑 ТОП-5 ЮЗЕРОВ ━━━\n"
+    if top_users:
+        for i, (uid, cnt) in enumerate(top_users, 1):
+            cur_u = await conn.execute("SELECT username, first_name FROM users WHERE user_id=?", (uid,))
+            urow = await cur_u.fetchone()
+            name = f"@{urow[0]}" if urow and urow[0] else (urow[1] if urow else f"ID {uid}")
+            text += f"{i}. {name} — {cnt} сделок\n"
+    else:
+        text += "Пока нет данных.\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 По дням", callback_data="adm_stats_days"),
+         InlineKeyboardButton(text="📈 По часам", callback_data="adm_stats_hours")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_panel")]
+    ])
+    await callback.message.edit_text(text, reply_markup=kb)
+
+@dp.callback_query(F.data == "adm_stats_days")
+async def adm_stats_days(callback: CallbackQuery):
+    await callback.answer()
+    conn = await get_db()
+    cur = await conn.execute("SELECT date, COUNT(*), SUM(profit_gram) FROM sales GROUP BY date ORDER BY id DESC LIMIT 7")
+    rows = await cur.fetchall()
+    text = "📅 <b>Статистика по дням</b>\n\n"
+    for r in reversed(rows):
+        text += f"• {_esc(r[0])}: {r[1]} сделок, {r[2] or 0:+.4f} GRAM\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_ext_stats")]])
+    try: await callback.message.edit_text(text, reply_markup=kb)
+    except: pass
+
+@dp.callback_query(F.data == "adm_stats_hours")
+async def adm_stats_hours(callback: CallbackQuery):
+    await callback.answer()
+    conn = await get_db()
+    cur = await conn.execute("SELECT CAST(strftime('%H', created_at) AS INTEGER) AS h, COUNT(*) FROM sales GROUP BY h ORDER BY h")
+    rows = await cur.fetchall()
+    text = "📈 <b>Статистика по часам</b>\n\n"
+    for r in rows:
+        text += f"• {r[0]:02d}:00 — {r[1]} сделок\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="admin_ext_stats")]])
     try: await callback.message.edit_text(text, reply_markup=kb)
     except: pass
 
@@ -2392,6 +2532,25 @@ async def admin_users(callback: CallbackQuery):
     conn = await get_db()
     cur = await conn.execute("SELECT user_id, username, first_name FROM users ORDER BY joined_date DESC LIMIT 20")
     text = "👥 <b>Последние пользователи:</b>\n\n" + "\n".join([f"• <code>{r[0]}</code> {r[2] or ''} (@{r[1] or '—'})" for r in await cur.fetchall()])
+    await callback.message.answer(text)
+
+@dp.callback_query(F.data == "admin_inline_stats")
+async def admin_inline_stats(callback: CallbackQuery):
+    await callback.answer()
+    conn = await get_db()
+    cur = await conn.execute("SELECT COUNT(DISTINCT user_id), COUNT(*) FROM inline_stats")
+    users, total = await cur.fetchone()
+    if not total:
+        await callback.message.answer("📈 Инлайн-режимом пока никто не пользовался.")
+        return
+    cur = await conn.execute("SELECT user_id, username, first_name, COUNT(*) FROM inline_stats GROUP BY user_id ORDER BY COUNT(*) DESC LIMIT 10")
+    top = await cur.fetchall()
+    text = "📈 <b>Инлайн-статистика</b>\n\n"
+    text += f"👥 Уникальных пользователей: {users}\n"
+    text += f"📤 Всего отправок: {total}\n\n🏆 <b>Топ-10 активных:</b>\n"
+    for i, (uid, uname, fname, cnt) in enumerate(top, 1):
+        name = f"@{uname}" if uname else (fname or f"ID {uid}")
+        text += f"{i}. {name} — {cnt} отправок\n"
     await callback.message.answer(text)
 
 @dp.callback_query(F.data == "admin_logs")
@@ -2534,6 +2693,7 @@ async def main():
 
     gift_sat_module = init_gift_sat(dp, bot, get_db, get_user_lang, ADMIN_IDS, AddProfit)
     if gift_sat_module:
+        await gift_sat_module.validate_token()
         asyncio.create_task(gift_sat_module.poll_sales())
         logger.info("✅ GiftSat модуль подключён")
 
@@ -2550,7 +2710,9 @@ async def main():
         if browser_instance:
             try: await browser_instance.close()
             except: pass
+        if gift_sat_module:
+            await gift_sat_module.close_session()
         await bot.session.close()
 
 if __name__ == "__main__":
-    asyncio.run(main())  
+    asyncio.run(main())   
