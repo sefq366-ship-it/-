@@ -4805,8 +4805,10 @@ async def main():
     import aiogram
     logger.info(f"aiogram version: {aiogram.__version__}")
     await init_db()
-    from widgets import setup_widgets
-    setup_widgets(dp, bot)
+
+    from widgets import setup_widgets, send_widget_raw, answer_widget_query_raw, CALC_WIDGET_HTML, DONATE_WIDGET_HTML, handle_widget_query_raw
+    setup_widgets(dp, bot, BOT_TOKEN)
+
     try:
         browser_instance = await pyppeteer.launch(
             headless=True,
@@ -4827,15 +4829,26 @@ async def main():
     try:
         await bot.delete_webhook(drop_pending_updates=True)
     except: pass
-    logger.info("🤖 Бот запущен!")
-    try:
-        await dp.start_polling(bot)
-    finally:
-        if browser_instance:
-            try:
-                await browser_instance.close()
-            except: pass
-        await bot.session.close()
+
+    logger.info("🤖 Бот запущен! (polling with widget support)")
+    offset = 0
+    while True:
+        try:
+            updates = await bot.get_updates(offset=offset, timeout=30, allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result", "widget_query"])
+            for update in updates:
+                offset = update.update_id + 1
+                update_dict = update.model_dump()
+                if "widget_query" in update_dict and update_dict["widget_query"]:
+                    asyncio.create_task(handle_widget_query_raw(update_dict["widget_query"]))
+                    continue
+                try:
+                    await dp.feed_update(bot, update)
+                except Exception as e:
+                    logger.error(f"dp.feed_update error: {e}")
+        except Exception as e:
+            logger.error(f"Polling error: {e}")
+            await asyncio.sleep(5)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
