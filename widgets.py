@@ -1,11 +1,15 @@
 # widgets.py
 import json
 import logging
+import aiohttp
+import asyncio
 from aiogram import Dispatcher
-from aiogram.types import WidgetQuery
+from aiogram.types import Message, CallbackQuery
+from aiogram.fsm.context import FSMContext
 
 logger = logging.getLogger(__name__)
 
+# HTML-шаблоны остаются без изменений
 CALC_WIDGET_HTML = """
 <!DOCTYPE html>
 <html>
@@ -102,24 +106,83 @@ DONATE_WIDGET_HTML = """
 </html>
 """
 
+# --- Прямые HTTP-запросы к Telegram ---
 
-def setup_widgets(dp: Dispatcher, bot):
-    """Регистрирует обработчик запросов от виджетов."""
+async def send_widget_raw(bot_token: str, chat_id: int, html: str, allow_queries: bool = True, width: int = 320, height: int = 260):
+    """Отправляет виджет через прямой запрос к api.telegram.org (Bot API 10.4)."""
+    url = f"https://api.telegram.org/bot{bot_token}/sendWidget"
+    payload = {
+        "chat_id": chat_id,
+        "html": html,
+        "allow_queries": allow_queries,
+        "width": width,
+        "height": height
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            data = await resp.json()
+            if not data.get("ok"):
+                logger.error(f"sendWidget failed: {data}")
+                return None
+            return data.get("result")
 
-    @dp.widget_query()
-    async def handle_widget_query(query: WidgetQuery):
+async def answer_widget_query_raw(bot_token: str, widget_query_id: str, data: str):
+    """Отвечает на запрос от виджета через прямой запрос."""
+    url = f"https://api.telegram.org/bot{bot_token}/answerWidgetQuery"
+    payload = {
+        "widget_query_id": widget_query_id,
+        "data": data
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            result = await resp.json()
+            if not result.get("ok"):
+                logger.error(f"answerWidgetQuery failed: {result}")
+            return result
+
+# --- Регистрация хендлеров для виджетов ---
+
+def setup_widgets(dp: Dispatcher, bot, bot_token: str):
+    """Регистрирует команды для отправки виджетов и обработчик ответов."""
+
+    @dp.message(lambda m: m.text in ["🔄 Калькулятор", "🔄 Calculator"])
+    async def calc_widget_handler(message: Message):
+        from bot import logger as bot_logger
+        bot_logger.info(f"calc_widget_handler triggered for user {message.from_user.id}")
+        result = await send_widget_raw(bot_token, message.chat.id, CALC_WIDGET_HTML, width=320, height=260)
+        if result is None:
+            await message.answer("❌ Не удалось открыть калькулятор. Попробуйте позже.")
+
+    @dp.message(lambda m: m.text in ["💎 Поддержать", "💎 Donate"])
+    async def donate_widget_handler(message: Message):
+        from bot import logger as bot_logger
+        bot_logger.info(f"donate_widget_handler triggered for user {message.from_user.id}")
+        result = await send_widget_raw(bot_token, message.chat.id, DONATE_WIDGET_HTML, width=320, height=240)
+        if result is None:
+            await message.answer("❌ Не удалось открыть донат-виджет. Попробуйте позже.")
+
+    # Обработчик для widget_query (если используется polling, нужно ловить updates вручную)
+    # В aiogram 3.31 нет widget_query, поэтому мы будем ловить его через сырые updates.
+    # Это делается в main() через bot.get_updates() или webhook.
+    # Здесь мы просто регистрируем функцию, которую вызовет ваш цикл polling.
+    
+    async def handle_widget_query(widget_query: dict):
+        """Обрабатывает widget_query, пришедший в update."""
         from bot import get_user_star_rate, get_gram_price
         from aiogram.types import LabeledPrice
-
+        
+        query_id = widget_query.get("id")
+        user_id = widget_query.get("from", {}).get("id")
+        raw_data = widget_query.get("data", "{}")
+        
         try:
-            data = json.loads(query.data or "{}")
+            data = json.loads(raw_data)
         except Exception:
-            await query.answer(data=json.dumps({"error": "Некорректный запрос"}))
+            await answer_widget_query_raw(bot_token, query_id, json.dumps({"error": "Некорректный запрос"}))
             return
-
+        
         action = data.get("action")
-        user_id = query.from_user.id
-
+        
         if action == "calc":
             try:
                 amount = float(data.get("amount", 0))
@@ -127,12 +190,12 @@ def setup_widgets(dp: Dispatcher, bot):
                 if amount <= 0:
                     raise ValueError
             except (ValueError, TypeError):
-                await query.answer(data=json.dumps({"error": "Введите число > 0"}))
+                await answer_widget_query_raw(bot_token, query_id, json.dumps({"error": "Введите число > 0"}))
                 return
-
+            
             star_rate = await get_user_star_rate(user_id)
             gram_price = await get_gram_price()
-
+            
             if direction == "gram_to_stars":
                 stars = (amount * gram_price) / (star_rate * 0.8)
                 text = f"💎 {amount:.2f} GRAM ≈ ⭐ {stars:.0f} Stars\n📊 Ваш курс: 1⭐ = ${star_rate:.6f}"
@@ -140,19 +203,19 @@ def setup_widgets(dp: Dispatcher, bot):
                 gram = (amount * 0.8 * star_rate) / gram_price
                 usd = gram * gram_price
                 text = f"⭐ {amount:.0f} Stars ≈ 💎 {gram:.4f} GRAM\n🪙 ${usd:.2f}"
-
-            await query.answer(data=json.dumps({"text": text}))
+            
+            await answer_widget_query_raw(bot_token, query_id, json.dumps({"text": text}))
             return
-
+        
         if action == "donate":
             try:
                 stars = int(data.get("stars", 0))
                 if stars < 1:
                     raise ValueError
             except (ValueError, TypeError):
-                await query.answer(data=json.dumps({"error": "Введите число ≥ 1"}))
+                await answer_widget_query_raw(bot_token, query_id, json.dumps({"error": "Введите число ≥ 1"}))
                 return
-
+            
             try:
                 await bot.send_invoice(
                     chat_id=user_id,
@@ -163,10 +226,13 @@ def setup_widgets(dp: Dispatcher, bot):
                     prices=[LabeledPrice(label="Донат", amount=stars)],
                     provider_token=""
                 )
-                await query.answer(data=json.dumps({"text": "✅ Счёт отправлен в чат!"}))
+                await answer_widget_query_raw(bot_token, query_id, json.dumps({"text": "✅ Счёт отправлен в чат!"}))
             except Exception as e:
                 logger.error(f"donate invoice: {e}")
-                await query.answer(data=json.dumps({"error": "Не удалось создать счёт"}))
+                await answer_widget_query_raw(bot_token, query_id, json.dumps({"error": "Не удалось создать счёт"}))
             return
-
-        await query.answer(data=json.dumps({"error": "Неизвестное действие"}))
+        
+        await answer_widget_query_raw(bot_token, query_id, json.dumps({"error": "Неизвестное действие"}))
+    
+    # Возвращаем функцию, чтобы её можно было вызывать из polling-цикла в main()
+    return handle_widget_query
