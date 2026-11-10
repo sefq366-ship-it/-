@@ -1,29 +1,25 @@
 FROM python:3.11-slim
 
-# Системные зависимости
-RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    ffmpeg \
+WORKDIR /app
+
+# Системные зависимости для pyppeteer (Chromium) и ffmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
-    libgbm1 \
-    libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
-    fonts-liberation \
+    ffmpeg \
+    gcc \
+    libffi-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Указываем pyppeteer использовать системный Chromium
-ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
-ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+# Переменная для pyppeteer, чтобы он не качал свой Chromium
+ENV PYPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
-WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
+
+# Не запускаем от root
+RUN useradd -m botuser && chown -R botuser:botuser /app
+USER botuser
+
 CMD ["python", "bot.py"]
