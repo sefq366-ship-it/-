@@ -4802,6 +4802,8 @@ async def debug_all_messages(message: Message):
 async def main():
     global browser_instance
     logger.info("🚀 Бот запускается...")
+    import aiogram
+    logger.info(f"aiogram version: {aiogram.__version__}")
     await init_db()
     from widgets import setup_widgets
     setup_widgets(dp, bot)
