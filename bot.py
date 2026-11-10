@@ -2971,20 +2971,18 @@ async def confirm_delete(callback: CallbackQuery, state: FSMContext):
 @dp.message(Command("calc"))
 async def calc_start(message: Message, state: FSMContext):
     await state.clear()
-    lang = await get_user_lang(message.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⭐ Stars → 💎 GRAM", callback_data="calc_stars_to_gram")],
-        [InlineKeyboardButton(text="💎 GRAM → ⭐ Stars", callback_data="calc_gram_to_stars")],
-        [InlineKeyboardButton(text=MESSAGES[lang]["cancel"], callback_data="cancel_deal")]
-    ])
-    text = (
-        "🔄 <b>Калькулятор</b>\n\n"
-        "Выбери направление пересчёта:\n"
-        "• <b>Stars → GRAM</b> — сколько получишь GRAM за звёзды\n"
-        "• <b>GRAM → Stars</b> — сколько Stars нужно на GRAM\n\n"
-        "💡 <i>Учитывается курс Stars и комиссия 20%</i>"
-    )
-    await message.answer(text, reply_markup=kb)
+    from widgets import CALC_WIDGET_HTML
+    try:
+        await bot.send_widget(
+            chat_id=message.chat.id,
+            html=CALC_WIDGET_HTML,
+            allow_queries=True,
+            width=320,
+            height=260
+        )
+    except Exception as e:
+        logger.error(f"calc_start widget error: {e}")
+        await message.answer("❌ Не удалось открыть калькулятор. Попробуйте позже.")
 
 @dp.callback_query(F.data.in_(["calc_stars_to_gram", "calc_gram_to_stars"]))
 async def calc_direction(callback: CallbackQuery, state: FSMContext):
@@ -3511,14 +3509,18 @@ async def timer_days_process(message: Message, state: FSMContext):
 @dp.message(F.text.in_(["💎 Поддержать", "💎 Donate"]))
 async def donate_menu(message: Message, state: FSMContext):
     await state.clear()
-    lang = await get_user_lang(message.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=MESSAGES[lang]["donate_stars"], callback_data="donate_stars")],
-        [InlineKeyboardButton(text=MESSAGES[lang]["donate_top"], callback_data="donate_top")],
-        [InlineKeyboardButton(text=MESSAGES[lang]["donate_wallet"], callback_data="donate_wallet")],
-        [InlineKeyboardButton(text=MESSAGES[lang]["cancel"], callback_data="cancel_deal")]
-    ])
-    await message.answer(MESSAGES[lang]["donate_menu"], reply_markup=kb)
+    from widgets import DONATE_WIDGET_HTML
+    try:
+        await bot.send_widget(
+            chat_id=message.chat.id,
+            html=DONATE_WIDGET_HTML,
+            allow_queries=True,
+            width=320,
+            height=240
+        )
+    except Exception as e:
+        logger.error(f"donate_menu widget error: {e}")
+        await message.answer("❌ Не удалось открыть донат-виджет. Попробуйте позже.")
 
 @dp.callback_query(F.data == "donate_wallet")
 async def donate_wallet(callback: CallbackQuery):
@@ -4801,6 +4803,8 @@ async def main():
     global browser_instance
     logger.info("🚀 Бот запускается...")
     await init_db()
+    from widgets import setup_widgets
+    setup_widgets(dp, bot)
     try:
         browser_instance = await pyppeteer.launch(
             headless=True,
