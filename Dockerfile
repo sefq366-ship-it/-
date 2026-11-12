@@ -1,29 +1,32 @@
+# 1. Берем базу Python
 FROM python:3.11-slim
 
-# Системные зависимости
+# 2. Устанавливаем системные пакеты (Chromium и FFmpeg)
 RUN apt-get update && apt-get install -y \
-    curl \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    ffmpeg \
     chromium \
+    ffmpeg \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
     libgbm1 \
     libasound2 \
-    libatk-bridge2.0-0 \
-    libatk1.0-0 \
-    libgtk-3-0 \
-    libnspr4 \
-    libnss3 \
     fonts-liberation \
+    --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-# Указываем pyppeteer использовать системный Chromium
+# 3. Указываем pyppeteer использовать системный Chromium (а не качать свой)
 ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
+# 4. Рабочая папка
 WORKDIR /app
+
+# 5. Копируем и ставим Python-библиотеки
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+
+# 6. Копируем код бота
 COPY . .
+
+# 7. Запуск
 CMD ["python", "bot.py"]
