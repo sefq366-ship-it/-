@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# ОБЩИЕ СТИЛИ
+# ОБЩИЕ СТИЛИ (COMMON CSS)
 # ============================================================
 
 COMMON_STYLE = """
@@ -363,7 +363,7 @@ updateDisplay();
 
 
 # ============================================================
-# 2. СТАТИСТИКА (С КНОПКАМИ 7/30/ВСЁ, ТОП-3 И ЛУЧШИЙ ФЛИП)
+# 2. СТАТИСТИКА
 # ============================================================
 
 STATS_WIDGET_HTML = """
@@ -407,27 +407,6 @@ STATS_WIDGET_HTML = """
 .profit-green { color: #7ee5a0; }
 .profit-red { color: #ff7777; }
 
-/* Кнопки периодов */
-.period-buttons {
-    display: flex;
-    gap: 6px;
-    margin-bottom: 10px;
-}
-.period-btn {
-    flex: 1;
-    height: 32px;
-    border-radius: 8px;
-    background: rgba(255,255,255,.07);
-    color: #929bb2;
-    font-size: 12px;
-    font-weight: 700;
-}
-.period-btn.active {
-    background: linear-gradient(135deg, #3987ff, #6659ed);
-    color: white;
-}
-
-/* Карточка лучшей сделки */
 .top-deal {
     background: rgba(46, 204, 113, 0.1);
     border: 1px solid rgba(46, 204, 113, 0.2);
@@ -437,17 +416,20 @@ STATS_WIDGET_HTML = """
     position: relative;
     overflow: hidden;
 }
-.top-deal-bg { position: absolute; right: -20px; top: -20px; font-size: 80px; opacity: 0.1; transform: rotate(15deg); }
+
+.top-deal-bg {
+    position: absolute;
+    right: -20px;
+    top: -20px;
+    font-size: 80px;
+    opacity: 0.1;
+    transform: rotate(15deg);
+}
+
 .top-deal-title { font-size: 12px; color: #7ee5a0; font-weight: 700; margin-bottom: 4px; }
 .top-deal-name { font-size: 15px; font-weight: 800; color: #fff; margin-bottom: 2px; }
 .top-deal-profit { font-size: 18px; font-weight: 900; color: #fff; }
 
-/* Топ коллекций */
-.top-collections { margin-top: 10px; }
-.coll-item { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #aab2c8; }
-.coll-name { font-weight: 700; color: #fff; }
-
-/* График на CSS */
 .css-chart {
     display: flex;
     align-items: flex-end;
@@ -457,13 +439,20 @@ STATS_WIDGET_HTML = """
     padding-bottom: 5px;
     border-bottom: 1px solid rgba(255,255,255,0.1);
 }
+
 .chart-bar {
     flex: 1;
     background: linear-gradient(to top, #3987ff, #6659ed);
     border-radius: 3px 3px 0 0;
     min-height: 5px;
 }
-.chart-label { text-align: center; color: #858da5; font-size: 9px; margin-top: 4px; }
+
+.chart-label {
+    text-align: center;
+    color: #858da5;
+    font-size: 9px;
+    margin-top: 4px;
+}
 
 </style>
 </head>
@@ -495,23 +484,11 @@ STATS_WIDGET_HTML = """
         </div>
     </div>
 
-    <!-- Кнопки периодов -->
-    <div class="period-buttons">
-        <button class="period-btn {{PERIOD_7D}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'7d'}))">7 дней</button>
-        <button class="period-btn {{PERIOD_30D}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'30d'}))">30 дней</button>
-        <button class="period-btn {{PERIOD_ALL}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'all'}))">Всё</button>
-    </div>
-
-    <!-- Лучший флип -->
     {{TOP_DEAL_HTML}}
 
-    <!-- Топ-3 коллекций -->
-    {{TOP_COLLECTIONS_HTML}}
-
-    <!-- График -->
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 5px;">
-            <span style="font-size: 11px; color: #fff; font-weight: 700;">Прибыль за период</span>
+            <span style="font-size: 11px; color: #fff; font-weight: 700;">Прибыль за 7 дней</span>
             <span style="font-size: 11px; color: #7ee5a0;">{{CHART_TOTAL}}</span>
         </div>
         <div class="css-chart">
@@ -599,12 +576,6 @@ DONATE_WIDGET_HTML = """
         </div>
         
         <div id="keyboard">
-            <div class="quick" style="display: flex; gap: 6px; margin-bottom: 8px;">
-                <button class="btn" onclick="setQuick(0.5)">0.5</button>
-                <button class="btn" onclick="setQuick(1)">1</button>
-                <button class="btn" onclick="setQuick(5)">5</button>
-                <button class="btn" onclick="setQuick(10)">10</button>
-            </div>
             <div class="row">
                 <button class="btn" onclick="press('1')">1</button>
                 <button class="btn" onclick="press('2')">2</button>
@@ -665,13 +636,12 @@ function updateDisplay() {
 function press(n) {
     if (current.length >= 10) return;
     
-    // Защита для точки
     if (n === '.') {
-        if (current.includes('.')) return; // Уже есть точка
-        if (current === "") { current = "0."; updateDisplay(); return; } // Пустое поле
+        if (current.includes('.')) return;
+        if (current === "") { current = "0."; updateDisplay(); return; }
     }
     
-    if (type === "stars" && n === '.') return; // Звезды - только целые
+    if (type === "stars" && n === '.') return;
     
     current += n;
     updateDisplay();
@@ -685,8 +655,6 @@ function clearAll() {
     document.getElementById("resultBox").classList.remove("show");
     document.getElementById("gramPayContainer").innerHTML = "";
 }
-
-function setQuick(v) { current = String(v); updateDisplay(); }
 
 function resetWidget() {
     current = "";
@@ -706,14 +674,12 @@ function donate() {
     }
     
     if (type === "gram") {
-        busy = true;
-        document.getElementById("mainDonateBtn").textContent = "ОТПРАВКА...";
-        TelegramWidget.request(JSON.stringify({ action: "donate", type: "gram", amount: amount })).then(function(answer) {
-            var r = JSON.parse(answer.result); 
-            document.getElementById("keyboard").style.display = "none"; 
-            document.getElementById("resultBox").classList.add("show"); 
-            document.getElementById("resultText").innerHTML = r.text || "✅ Ссылка отправлена в чат!";
-        }).catch(function() { alert("Ошибка сети"); }).finally(function() { busy = false; document.getElementById("mainDonateBtn").textContent = "❤️ ПОДДЕРЖАТЬ"; });
+        var amountStr = current;
+        var url = "https://t.me/sendgrams?to=@sefq1337&amount=" + encodeURIComponent(amountStr);
+        document.getElementById("keyboard").style.display = "none"; 
+        document.getElementById("resultBox").classList.add("show"); 
+        document.getElementById("resultText").innerHTML = "💎 К оплате: <b>" + amountStr + " GRAM</b>";
+        document.getElementById("gramPayContainer").innerHTML = '<a href="' + url + '" target="_blank" class="pay-link">🚀 Перейти к оплате ' + amountStr + ' GRAM</a>';
     } else {
         busy = true;
         document.getElementById("mainDonateBtn").textContent = "ОТПРАВКА...";
@@ -755,7 +721,8 @@ SETTINGS_WIDGET_HTML = """
 .setting-label { font-size: 14px; font-weight: 700; color: #fff; }
 .setting-desc { font-size: 11px; color: #858da5; margin-top: 2px; }
 .setting-btn { padding: 6px 12px; border-radius: 8px; background: rgba(56,130,255,.15); color: #8cb4ff; font-size: 12px; font-weight: 700; }
-.setting-btn:active { background: rgba(56,130,255,.3); }
+.input-area { display: none; margin-top: 10px; }
+.input-area.show { display: block; }
 
 </style>
 </head>
@@ -766,30 +733,60 @@ SETTINGS_WIDGET_HTML = """
         <span class="header-title">Настройки</span>
     </div>
     <div class="subtitle">Персонализация бота</div>
-    <div class="card">
+    
+    <div class="card" id="mainSettings">
         <div class="setting-item">
             <div>
                 <div class="setting-label">Комиссия</div>
                 <div class="setting-desc">Текущая: {{ROYALTY}} GRAM</div>
             </div>
-            <button class="setting-btn" onclick="TelegramWidget.request(JSON.stringify({action:'setting', key:'royalty'}))">Изменить</button>
+            <button class="setting-btn" onclick="startEdit('royalty', '{{ROYALTY}}')">Изменить</button>
         </div>
         <div class="setting-item">
             <div>
                 <div class="setting-label">Цель по профиту</div>
                 <div class="setting-desc">Текущая: {{GOAL}} GRAM</div>
             </div>
-            <button class="setting-btn" onclick="TelegramWidget.request(JSON.stringify({action:'setting', key:'goal'}))">Изменить</button>
+            <button class="setting-btn" onclick="startEdit('goal', '{{GOAL}}')">Изменить</button>
         </div>
         <div class="setting-item" style="border-bottom: none;">
             <div>
                 <div class="setting-label">Курс Stars</div>
                 <div class="setting-desc">Текущий: ${{STAR_RATE}}</div>
             </div>
-            <button class="setting-btn" onclick="TelegramWidget.request(JSON.stringify({action:'setting', key:'star_rate'}))">Изменить</button>
+            <button class="setting-btn" onclick="startEdit('star_rate', '{{STAR_RATE}}')">Изменить</button>
+        </div>
+    </div>
+
+    <div class="card input-area" id="editArea">
+        <div style="font-size: 14px; margin-bottom: 8px; font-weight: 700;" id="editLabel">Введите значение</div>
+        <div class="display" id="display"><span class="placeholder">0</span></div>
+        <div class="row"><button class="btn" onclick="press('1')">1</button><button class="btn" onclick="press('2')">2</button><button class="btn" onclick="press('3')">3</button></div>
+        <div class="row"><button class="btn" onclick="press('4')">4</button><button class="btn" onclick="press('5')">5</button><button class="btn" onclick="press('6')">6</button></div>
+        <div class="row"><button class="btn" onclick="press('7')">7</button><button class="btn" onclick="press('8')">8</button><button class="btn" onclick="press('9')">9</button></div>
+        <div class="row"><button class="btn secondary" onclick="backspace()">⌫</button><button class="btn" onclick="press('0')">0</button><button class="btn" onclick="press('.')">.</button></div>
+        <div class="row" style="margin-top: 10px;">
+            <button class="btn" style="background: rgba(255,255,255,.1);" onclick="cancelEdit()">Отмена</button>
+            <button class="btn primary" style="flex: 2;" onclick="saveEdit()">СОХРАНИТЬ</button>
         </div>
     </div>
 </div>
+<script>
+var current = ""; var editKey = "";
+function press(n) { if (current.length >= 12) return; if (n === '.') { if (current.includes('.')) return; if (current === "") { current = "0."; updateDisplay(); return; } } current += n; updateDisplay(); }
+function backspace() { current = current.slice(0, -1); updateDisplay(); }
+function updateDisplay() { var el = document.getElementById("display"); if (!current) { el.innerHTML = '<span class="placeholder">0</span>'; } else { el.textContent = current; } }
+function startEdit(key, val) { editKey = key; current = String(val); document.getElementById("mainSettings").style.display = "none"; document.getElementById("editArea").classList.add("show"); document.getElementById("editLabel").innerText = "Изменить: " + key; updateDisplay(); }
+function cancelEdit() { document.getElementById("mainSettings").style.display = "block"; document.getElementById("editArea").classList.remove("show"); }
+function saveEdit() {
+    var val = Number(current);
+    if (!Number.isFinite(val) || val < 0) { alert("Неверное значение"); return; }
+    TelegramWidget.request(JSON.stringify({ action: "save_setting", key: editKey, value: val })).then(function(answer) {
+        var r = JSON.parse(answer.result);
+        if (r.error) { alert(r.error); } else { alert("✅ Сохранено! Перезапустите виджет."); cancelEdit(); }
+    }).catch(function() { alert("Ошибка сети"); });
+}
+</script>
 </body>
 </html>
 """
@@ -799,18 +796,9 @@ SETTINGS_WIDGET_HTML = """
 # ОТПРАВКА WIDGET
 # ============================================================
 
-async def send_widget_raw(
-    bot_token: str,
-    chat_id: int,
-    html: str,
-    allow_queries: bool = True
-):
+async def send_widget_raw(bot_token: str, chat_id: int, html: str, allow_queries: bool = True):
     url = f"https://api.telegram.org/bot{bot_token}/sendWidget"
-    payload = {
-        "chat_id": chat_id,
-        "html": html,
-        "allow_queries": allow_queries
-    }
+    payload = {"chat_id": chat_id, "html": html, "allow_queries": allow_queries}
     timeout = aiohttp.ClientTimeout(total=20)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -829,26 +817,15 @@ async def send_widget_raw(
 # ОТВЕТ НА WIDGET QUERY
 # ============================================================
 
-async def answer_widget_query_raw(
-    bot_token: str,
-    widget_query_id: str,
-    data: str
-):
+async def answer_widget_query_raw(bot_token: str, widget_query_id: str, data: str):
     url = f"https://api.telegram.org/bot{bot_token}/answerWidgetQuery"
-    payload = {
-        "widget_query_id": widget_query_id,
-        "data": data
-    }
+    payload = {"widget_query_id": widget_query_id, "data": data}
     timeout = aiohttp.ClientTimeout(total=15)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(url, json=payload) as resp:
-                result = await resp.json()
-                if not result.get("ok"):
-                    logger.error("answerWidgetQuery failed: %s", result)
-                return result
+                return await resp.json()
     except Exception:
-        logger.exception("Widget answer error")
         return None
 
 
@@ -856,106 +833,58 @@ async def answer_widget_query_raw(
 # ОБРАБОТКА ЗАПРОСОВ
 # ============================================================
 
-async def handle_widget_query_raw(
-    widget_query: dict,
-    bot,
-    bot_token: str,
-    get_user_star_rate=None,
-    get_gram_price=None,
-    get_db=None
-):
+async def handle_widget_query_raw(widget_query: dict, bot, bot_token: str, get_user_star_rate=None, get_gram_price=None, get_db=None):
     query_id = widget_query.get("id")
     user_id = widget_query.get("from", {}).get("id")
-    if not query_id or not user_id:
-        return
+    if not query_id or not user_id: return
 
     async def respond(result):
         await answer_widget_query_raw(bot_token, query_id, json.dumps(result, ensure_ascii=False))
 
-    try:
-        data = json.loads(widget_query.get("data", "{}"))
-    except (ValueError, TypeError):
+    try: data = json.loads(widget_query.get("data", "{}"))
+    except: 
         await respond({"error": "Некорректный запрос"})
         return
 
     action = data.get("action")
 
-    # --------------------------------------------------------
-    # КАЛЬКУЛЯТОР
-    # --------------------------------------------------------
+    # --- КАЛЬКУЛЯТОР ---
     if action == "calc":
         if get_user_star_rate is None or get_gram_price is None:
-            await respond({"error": "Сервис временно недоступен"})
-            return
-
+            await respond({"error": "Сервис временно недоступен"}); return
         try:
             amount = float(data.get("amount", 0))
             direction = data.get("dir", "stars_to_gram")
             star_rate = float(await get_user_star_rate(user_id))
             gram_price = float(await get_gram_price())
-
             if direction == "gram_to_stars":
                 stars = (amount * gram_price) / (star_rate * 0.8)
-                label = f"💎 {amount:.4f} GRAM ≈"
-                value = f"⭐ {stars:.0f} Stars"
+                await respond({"label": f"💎 {amount:.4f} GRAM ≈", "value": f"⭐ {stars:.0f} Stars"})
             else:
                 gram = (amount * 0.8 * star_rate) / gram_price
-                label = f"⭐ {amount:.0f} Stars ≈"
-                value = f"💎 {gram:.4f} GRAM (${gram * gram_price:.2f})"
-
-            await respond({"label": label, "value": value})
-        except Exception:
-            logger.exception("Calculator error")
-            await respond({"error": "Ошибка расчёта"})
+                await respond({"label": f"⭐ {amount:.0f} Stars ≈", "value": f"💎 {gram:.4f} GRAM (${gram * gram_price:.2f})"})
+        except: await respond({"error": "Ошибка расчёта"})
         return
 
-    # --------------------------------------------------------
-    # ДОНАТ
-    # --------------------------------------------------------
-    if action == "donate":
-        donate_type = data.get("type", "stars")
+    # --- ДОНАТ ---
+    if action == "donate" and data.get("type") == "stars":
         amount = float(data.get("amount", 0))
-        
-        if amount <= 0:
-            await respond({"error": "Неверная сумма"})
-            return
-            
+        if amount <= 0: await respond({"error": "Неверная сумма"}); return
         try:
-            if donate_type == "gram":
-                amount_str = f"{amount:g}"
-                url = f"https://t.me/sendgrams?to=@sefq1337&amount={amount_str}"
-                text = f"💎 <b>Оплата GRAM</b>\nСумма: <b>{amount_str} GRAM</b>\n\n⚠️ <i>После перевода напиши админу для зачисления в топ!</i>"
-                await bot.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=f"💎 Оплатить {amount_str} GRAM", url=url)]]))
-                await respond({"text": "✅ Ссылка отправлена в чат!"})
-            else:
-                stars = int(amount)
-                await bot.send_invoice(
-                    chat_id=user_id,
-                    title="⭐ Поддержка",
-                    description=f"Донат {stars} звёзд",
-                    payload=f"donate_{user_id}_{stars}",
-                    currency="XTR",
-                    prices=[LabeledPrice(label="Донат", amount=stars)],
-                    provider_token=""
-                )
-                await respond({"text": "✅ Инвойс отправлен!"})
-        except Exception:
-            logger.exception("Donate error")
-            await respond({"error": "Ошибка оплаты"})
+            stars = int(amount)
+            await bot.send_invoice(chat_id=user_id, title="⭐ Поддержка", description=f"Донат {stars} звёзд", payload=f"donate_{user_id}_{stars}", currency="XTR", prices=[LabeledPrice(label="Донат", amount=stars)], provider_token="")
+            await respond({"text": "✅ Счёт Stars отправлен в чат!"})
+        except: await respond({"error": "Ошибка оплаты"})
         return
 
-    # --------------------------------------------------------
-    # ТОП ДОНАТОВ
-    # --------------------------------------------------------
+    # --- ТОП ДОНАТОВ ---
     if action == "donate_top":
         try:
             conn = await get_db()
             cur = await conn.execute("SELECT d.user_id, SUM(d.amount) as total, u.username, u.first_name FROM donations d LEFT JOIN users u ON u.user_id = d.user_id GROUP BY d.user_id ORDER BY total DESC LIMIT 10")
             rows = await cur.fetchall()
-            
             text = "🏆 <b>Топ донатеров (Stars)</b>\n\n"
-            if not rows:
-                text += "Пока пусто. Стань первым!"
+            if not rows: text += "Пока пусто. Стань первым!"
             else:
                 for i, (uid, total, uname, fname) in enumerate(rows, 1):
                     emoji = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
@@ -963,39 +892,25 @@ async def handle_widget_query_raw(
                     text += f"{emoji} {name} — {total} ⭐\n"
             await bot.send_message(user_id, text)
             await respond({"text": "Топ отправлен"})
-        except Exception:
-            await respond({"error": "Ошибка"})
+        except: await respond({"error": "Ошибка"})
         return
 
-    # --------------------------------------------------------
-    # НАСТРОЙКИ (Кнопка из виджета)
-    # --------------------------------------------------------
-    if action == "setting":
+    # --- СОХРАНЕНИЕ НАСТРОЕК ---
+    if action == "save_setting":
         key = data.get("key")
-        await bot.send_message(user_id, f"⚙️ <b>Изменение: {key}</b>\n\n<i>Пожалуйста, введи новое значение в чат бота.</i>")
-        await respond({"text": "Инструкция отправлена!"})
-        return
-
-    # --------------------------------------------------------
-    # СТАТИСТИКА: СМЕНА ПЕРИОДА
-    # --------------------------------------------------------
-    if action == "stats_period":
-        period = data.get("period", "7d")
-        # Отправляем запрос в bot.py, чтобы он перерисовал виджет
-        await respond({"text": "🔄 Обновляю статистику..."})
-        # В bot.py мы добавим обработку этого action, которая пересчитает данные и пришлет новый виджет.
-        # Но так как виджет нельзя отредактировать, бот пришлет новое сообщение.
-        # (Эта логика будет в bot.py)
+        value = float(data.get("value", 0))
+        if get_db is None: await respond({"error": "Сервис недоступен"}); return
+        try:
+            from bot import save_user_royalty, save_user_star_rate
+            if key == "royalty": await save_user_royalty(user_id, value)
+            elif key == "star_rate": await save_user_star_rate(user_id, value)
+            elif key == "goal":
+                conn = await get_db()
+                await conn.execute("INSERT OR REPLACE INTO profit_goals (user_id, goal_gram, created_at, notified) VALUES (?,?,datetime('now'),0)", (user_id, value))
+                await conn.commit()
+            await respond({"text": "✅ Настройка сохранена!"})
+        except Exception as e:
+            await respond({"error": "Ошибка сохранения"})
         return
 
     await respond({"error": "Неизвестное действие"})
-
-
-# ============================================================
-# РЕГИСТРАЦИЯ ОБРАБОТЧИКОВ (ОСТАВЛЕНА ДЛЯ СОВМЕСТИМОСТИ)
-# ============================================================
-
-def setup_widgets(dp: Dispatcher, bot, bot_token: str):
-    # В текущей архитектуре bot.py кнопки обрабатываются напрямую,
-    # поэтому эта функция оставлена пустой, чтобы не было конфликтов.
-    pass
