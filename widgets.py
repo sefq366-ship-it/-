@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 # ============================================================
-# ОБЩИЕ СТИЛИ (COMMON CSS)
+# ОБЩИЕ СТИЛИ
 # ============================================================
 
 COMMON_STYLE = """
@@ -243,7 +243,7 @@ CALC_WIDGET_HTML = """
             <span class="placeholder">Введите сумму</span>
         </div>
         
-        <div class="hint" id="hint">Введите сумму в Stars</div>
+        <div class="hint" id="hint" style="color: #858da5; font-size: 11px; margin-bottom: 8px; text-align: right;">Введите сумму в Stars</div>
 
         <div class="directions">
             <button class="direction active" id="dir1" onclick="setDir('stars_to_gram')">
@@ -275,7 +275,11 @@ CALC_WIDGET_HTML = """
         <div class="row">
             <button class="btn secondary" onclick="backspace()">⌫</button>
             <button class="btn" onclick="press('0')">0</button>
-            <button class="btn primary" onclick="calculate()">РАССЧИТАТЬ</button>
+            <button class="btn" onclick="press('.')">.</button>
+        </div>
+
+        <div class="row">
+            <button class="btn primary" onclick="calculate()" style="flex: 3;">РАССЧИТАТЬ</button>
         </div>
 
         <div class="result" id="result">
@@ -302,6 +306,10 @@ function updateDisplay() {
 
 function press(n) {
     if (current.length >= 12) return;
+    if (n === '.') {
+        if (current.includes('.')) return;
+        if (current === "") { current = "0."; updateDisplay(); return; }
+    }
     current += n;
     updateDisplay();
 }
@@ -355,7 +363,7 @@ updateDisplay();
 
 
 # ============================================================
-# 2. СТАТИСТИКА
+# 2. СТАТИСТИКА (С КНОПКАМИ 7/30/ВСЁ, ТОП-3 И ЛУЧШИЙ ФЛИП)
 # ============================================================
 
 STATS_WIDGET_HTML = """
@@ -399,6 +407,26 @@ STATS_WIDGET_HTML = """
 .profit-green { color: #7ee5a0; }
 .profit-red { color: #ff7777; }
 
+/* Кнопки периодов */
+.period-buttons {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+.period-btn {
+    flex: 1;
+    height: 32px;
+    border-radius: 8px;
+    background: rgba(255,255,255,.07);
+    color: #929bb2;
+    font-size: 12px;
+    font-weight: 700;
+}
+.period-btn.active {
+    background: linear-gradient(135deg, #3987ff, #6659ed);
+    color: white;
+}
+
 /* Карточка лучшей сделки */
 .top-deal {
     background: rgba(46, 204, 113, 0.1);
@@ -409,19 +437,15 @@ STATS_WIDGET_HTML = """
     position: relative;
     overflow: hidden;
 }
-
-.top-deal-bg {
-    position: absolute;
-    right: -20px;
-    top: -20px;
-    font-size: 80px;
-    opacity: 0.1;
-    transform: rotate(15deg);
-}
-
+.top-deal-bg { position: absolute; right: -20px; top: -20px; font-size: 80px; opacity: 0.1; transform: rotate(15deg); }
 .top-deal-title { font-size: 12px; color: #7ee5a0; font-weight: 700; margin-bottom: 4px; }
 .top-deal-name { font-size: 15px; font-weight: 800; color: #fff; margin-bottom: 2px; }
 .top-deal-profit { font-size: 18px; font-weight: 900; color: #fff; }
+
+/* Топ коллекций */
+.top-collections { margin-top: 10px; }
+.coll-item { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; color: #aab2c8; }
+.coll-name { font-weight: 700; color: #fff; }
 
 /* График на CSS */
 .css-chart {
@@ -433,20 +457,13 @@ STATS_WIDGET_HTML = """
     padding-bottom: 5px;
     border-bottom: 1px solid rgba(255,255,255,0.1);
 }
-
 .chart-bar {
     flex: 1;
     background: linear-gradient(to top, #3987ff, #6659ed);
     border-radius: 3px 3px 0 0;
     min-height: 5px;
 }
-
-.chart-label {
-    text-align: center;
-    color: #858da5;
-    font-size: 9px;
-    margin-top: 4px;
-}
+.chart-label { text-align: center; color: #858da5; font-size: 9px; margin-top: 4px; }
 
 </style>
 </head>
@@ -478,16 +495,26 @@ STATS_WIDGET_HTML = """
         </div>
     </div>
 
-    <!-- Сюда вставляется карточка лучшей сделки -->
+    <!-- Кнопки периодов -->
+    <div class="period-buttons">
+        <button class="period-btn {{PERIOD_7D}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'7d'}))">7 дней</button>
+        <button class="period-btn {{PERIOD_30D}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'30d'}))">30 дней</button>
+        <button class="period-btn {{PERIOD_ALL}}" onclick="TelegramWidget.request(JSON.stringify({action:'stats_period', period:'all'}))">Всё</button>
+    </div>
+
+    <!-- Лучший флип -->
     {{TOP_DEAL_HTML}}
 
+    <!-- Топ-3 коллекций -->
+    {{TOP_COLLECTIONS_HTML}}
+
+    <!-- График -->
     <div class="card">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 5px;">
-            <span style="font-size: 11px; color: #fff; font-weight: 700;">Прибыль за 7 дней</span>
+            <span style="font-size: 11px; color: #fff; font-weight: 700;">Прибыль за период</span>
             <span style="font-size: 11px; color: #7ee5a0;">{{CHART_TOTAL}}</span>
         </div>
         <div class="css-chart">
-            <!-- Сюда вставляются столбики -->
             {{CHART_BARS}}
         </div>
         <div class="chart-label">{{CHART_DATES}}</div>
@@ -638,16 +665,13 @@ function updateDisplay() {
 function press(n) {
     if (current.length >= 10) return;
     
+    // Защита для точки
     if (n === '.') {
-        if (current.includes('.')) return;
-        if (current === "") { 
-            current = "0."; 
-            updateDisplay(); 
-            return; 
-        }
+        if (current.includes('.')) return; // Уже есть точка
+        if (current === "") { current = "0."; updateDisplay(); return; } // Пустое поле
     }
     
-    if (type === "stars" && n === '.') return;
+    if (type === "stars" && n === '.') return; // Звезды - только целые
     
     current += n;
     updateDisplay();
@@ -950,6 +974,18 @@ async def handle_widget_query_raw(
         key = data.get("key")
         await bot.send_message(user_id, f"⚙️ <b>Изменение: {key}</b>\n\n<i>Пожалуйста, введи новое значение в чат бота.</i>")
         await respond({"text": "Инструкция отправлена!"})
+        return
+
+    # --------------------------------------------------------
+    # СТАТИСТИКА: СМЕНА ПЕРИОДА
+    # --------------------------------------------------------
+    if action == "stats_period":
+        period = data.get("period", "7d")
+        # Отправляем запрос в bot.py, чтобы он перерисовал виджет
+        await respond({"text": "🔄 Обновляю статистику..."})
+        # В bot.py мы добавим обработку этого action, которая пересчитает данные и пришлет новый виджет.
+        # Но так как виджет нельзя отредактировать, бот пришлет новое сообщение.
+        # (Эта логика будет в bot.py)
         return
 
     await respond({"error": "Неизвестное действие"})
