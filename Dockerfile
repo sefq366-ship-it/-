@@ -1,18 +1,33 @@
-# ... ваши зависимости ...
+# Берем официальный образ Python (slim версия, чтобы не тащить лишнего)
+FROM python:3.11-slim
 
-# Создаём папку для данных и даём полные права ВСЕМ (для теста)
-RUN mkdir -p /app/data && chmod -R 777 /app/data
+# Устанавливаем рабочую директорию
+WORKDIR /app
 
-# Копируем код
+# 1. Устанавливаем системные зависимости для Chromium и FFmpeg
+# Без этих пакетов Chromium не запустится (ошибка libnss3, libatk и т.д.)
+RUN apt-get update && apt-get install -y \
+    chromium \
+    ffmpeg \
+    libnss3 \
+    libatk-bridge2.0-0 \
+    libgtk-3-0 \
+    libgbm1 \
+    libasound2 \
+    fonts-liberation \
+    --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. Говорим pyppeteer не скачивать свой Chromium, а использовать системный
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+
+# 3. Копируем и устанавливаем Python-зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 4. Копируем весь код бота
 COPY . .
 
-# Создаём пользователя и даём ему права на /app
-RUN useradd -m botuser && chown -R botuser:botuser /app
-
-# Переменная окружения, чтобы бот знал, куда писать
-ENV DB_PATH=/app/data/sales.db
-
-# Переключаемся на пользователя (папка data уже с правами 777)
-USER botuser
-
+# 5. Запускаем бота
 CMD ["python", "bot.py"]
