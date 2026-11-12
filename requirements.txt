@@ -1,6 +1,6 @@
-aiogram>=3.31.0
-aiosqlite>=0.20.0
-aiohttp>=3.9.0
-beautifulsoup4>=4.12.0
-pyppeteer>=1.0.2
-Pillow>=10.0.0
+aiogram==3.31.0
+aiosqlite
+aiohttp
+pyppeteer
+beautifulsoup4
+pillow
