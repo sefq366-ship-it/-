@@ -232,13 +232,6 @@ async def set_user_lang(user_id, lang):
 async def get_db():
     global db
     if db is None:
-        for ext in ["-wal", "-shm"]:
-            p = Path(DB_PATH + ext)
-            if p.exists():
-                try:
-                    p.unlink()
-                except:
-                    pass
         db = await aiosqlite.connect(DB_PATH)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
@@ -1353,12 +1346,12 @@ async def ensure_gif_rendered(slug: str, nft_link: str, notify_user_id: int = No
     try:
         result = await task
     except Exception as e:
-        err = str(e)
-        if "404" in err:
+        err = str(e).lower()
+        if "lottie" in err or "404" in err or "403" in err or "not found" in err:
             retry = time.time() + 86400
             await conn.execute("INSERT OR REPLACE INTO gif_cache (slug, file_id, unavailable, retry_after) VALUES (?, NULL, 1, ?)", (slug, retry))
             await conn.commit()
-            logger.info(f"[GIF] {slug} недоступна (404) — повтор через 24ч")
+            logger.info(f"[GIF] {slug} недоступна (Lottie not found / 403 / 404) — повтор через 24ч")
             await log_action(0, "system", "gif_404", f"Slug: {slug}, повтор через 24ч")
         else:
             logger.warning(f"[GIF] {slug}: {e}")
@@ -4516,28 +4509,63 @@ async def admin_backup(callback: CallbackQuery):
         await callback.message.answer(f"❌ Ошибка бэкапа: {e}")
 
 async def create_and_send_backup(admin_id: int):
-    date_str = datetime.now().strftime("%Y-%m-%d")
+    date_str = datetime.now().strftime("%Y-%m-%d_%H-%M")
     zip_filename = f"backup_{date_str}.zip"
-    files_to_backup = ["sales.db", "sales.db-wal", "sales.db-shm"]
-    existing = [f for f in files_to_backup if Path(f).exists()]
-    if not existing:
+    
+    db_files = ["sales.db", "sales.db-wal", "sales.db-shm"]
+    code_files = [
+        "bot.py", "widgets.py", "messages.py", "requirements.txt", 
+        "Dockerfile", "README_DESKTOP.md", "gif_db.py", "gif_renderer.py"
+    ]
+    
+    files_to_backup = []
+    for f in db_files + code_files:
+        if Path(f).exists():
+            files_to_backup.append(f)
+    
+    if not files_to_backup:
+        logger.warning("[BACKUP] Нет файлов для бэкапа")
         return
-    with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zf:
-        for f in existing:
-            zf.write(f, f)
-    conn = await get_db()
-    cur = await conn.execute("SELECT COUNT(*) FROM users")
-    users_count = (await cur.fetchone())[0]
-    cur = await conn.execute("SELECT COUNT(*) FROM sales")
-    deals_count = (await cur.fetchone())[0]
-    size_kb = Path(zip_filename).stat().st_size / 1024
-    caption = f"💾 <b>Бэкап БД</b>\n\n📅 Дата: {date_str}\n📊 Размер: {size_kb:.1f} КБ\n• Пользователей: {users_count}\n• Сделок: {deals_count}\n• Файлов: {len(existing)}"
+    
     try:
+        with zipfile.ZipFile(zip_filename, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in files_to_backup:
+                zf.write(f, f)
+        
+        conn = await get_db()
+        cur = await conn.execute("SELECT COUNT(*) FROM users")
+        users_count = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM sales")
+        deals_count = (await cur.fetchone())[0]
+        cur = await conn.execute("SELECT COUNT(*) FROM pending_sales")
+        pending_count = (await cur.fetchone())[0]
+        
+        size_kb = Path(zip_filename).stat().st_size / 1024
+        
+        caption = (
+            f"💾 <b>Полный бэкап бота</b>\n\n"
+            f"📅 Дата: {date_str}\n"
+            f"📊 Размер: {size_kb:.1f} КБ\n"
+            f"• Пользователей: {users_count}\n"
+            f"• Сделок: {deals_count}\n"
+            f"• Отложенных: {pending_count}\n"
+            f"• Файлов в архиве: {len(files_to_backup)}\n\n"
+            f"<i>В архиве: база данных + исходный код</i>"
+        )
+        
         await bot.send_document(admin_id, FSInputFile(zip_filename), caption=caption)
-    except: pass
-    try:
-        Path(zip_filename).unlink()
-    except: pass
+        logger.info(f"[BACKUP] Отправлен архив {zip_filename} ({len(files_to_backup)} файлов)")
+        
+    except Exception as e:
+        logger.error(f"[BACKUP] Ошибка создания архива: {e}")
+        try:
+            await bot.send_message(admin_id, f"❌ Ошибка при создании бэкапа: {e}")
+        except: pass
+    finally:
+        try:
+            if Path(zip_filename).exists():
+                Path(zip_filename).unlink()
+        except: pass
 
 # ---------- ДИАГНОСТИКА БД ----------
 @dp.message(Command("dbcheck"))
