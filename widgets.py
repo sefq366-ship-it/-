@@ -421,6 +421,30 @@ async def handle_widget_query_raw(widget_query: dict, bot, bot_token: str, get_u
         except: await respond({"error": "Ошибка"})
         return
 
+    # --- СТАТИСТИКА: СМЕНА ПЕРИОДА ---
+    if action == "stats_period":
+        period = data.get("period", "7d")
+        if get_db is None:
+            await respond({"error": "Сервис недоступен"}); return
+        try:
+            from bot import user_stats_widget
+            
+            class FakeMessage:
+                def __init__(self, chat_id, user_id):
+                    self.chat_id = chat_id
+                    self.from_user = type('obj', (object,), {'id': user_id})()
+                    self.chat = type('obj', (object,), {'id': chat_id})()  # <-- ДОБАВЛЕНО
+                async def answer(self, text, reply_markup=None):
+                    await bot.send_message(self.chat_id, text, reply_markup=reply_markup)
+            
+            fake_msg = FakeMessage(user_id, user_id)
+            await user_stats_widget(fake_msg, period)
+            await respond({"text": "📊 Статистика обновлена"})
+        except Exception as e:
+            logger.exception(f"Stats period error: {e}")
+            await respond({"error": "Ошибка обновления"})
+        return
+
     # --- СОХРАНЕНИЕ НАСТРОЕК ---
     if action == "save_setting":
         key = data.get("key")
